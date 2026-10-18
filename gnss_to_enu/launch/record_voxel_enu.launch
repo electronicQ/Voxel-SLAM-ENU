@@ -1,0 +1,28 @@
+<launch>
+  <!-- First valid fix defines ENU origin by default; manual datum is optional. -->
+  <arg name="use_auto_datum" default="true" />
+  <!-- Ignored in automatic mode; supply actual values in manual mode. -->
+  <arg name="datum_lat" default="0.0" />
+  <arg name="datum_lon" default="0.0" />
+  <arg name="datum_alt" default="0.0" />
+  <arg name="record_dir" />
+  <arg name="fix_topic" default="/rtk/navsatfix" />
+  <arg name="use_sim_time" default="false" />
+  <arg name="xy_variance_max" default="0.01" />
+  <arg name="z_variance_max" default="0.04" />
+  <param name="use_sim_time" value="$(arg use_sim_time)" />
+  <node pkg="gnss_to_enu" type="gnss_to_enu.py" name="gnss_to_enu_node" output="screen" required="true">
+    <param name="sub_topic" value="$(arg fix_topic)" />
+    <param name="pub_topic" value="/rtk/gps_odom" />
+    <param name="enu_frame" value="enu" />
+    <param name="use_auto_datum" value="$(arg use_auto_datum)" />
+    <param name="datum_lat" value="$(arg datum_lat)" />
+    <param name="datum_lon" value="$(arg datum_lon)" />
+    <param name="datum_alt" value="$(arg datum_alt)" />
+    <param name="record_dir" value="$(arg record_dir)" />
+    <param name="min_T_intervel" value="0.0" />
+    <param name="min_D_interval" value="0.0" />
+    <param name="gnss_xy_var_threshold" value="$(arg xy_variance_max)" />
+    <param name="gnss_z_var_threshold" value="$(arg z_variance_max)" />
+  </node>
+</launch>

@@ -1,0 +1,35 @@
+<launch>
+  <arg name="config" default="$(find voxel_slam)/config/avia_fly.yaml" />
+  <arg name="save_path" /> <!-- Existing writable directory, with trailing /. -->
+  <arg name="bagname" />   <!-- New session directory name. -->
+  <arg name="use_auto_datum" default="true" />
+  <!-- Ignored in automatic mode; supply actual values in manual mode. -->
+  <arg name="datum_lat" default="0.0" />
+  <arg name="datum_lon" default="0.0" />
+  <arg name="datum_alt" default="0.0" />
+  <arg name="record_dir" />
+  <arg name="fix_topic" default="/rtk/navsatfix" />
+  <arg name="use_sim_time" default="false" />
+  <arg name="rviz" default="true" />
+  <arg name="xy_variance_max" default="0.01" />
+  <arg name="z_variance_max" default="0.04" />
+  <rosparam command="load" file="$(arg config)" />
+  <param name="General/save_path" value="$(arg save_path)" />
+  <param name="General/bagname" value="$(arg bagname)" />
+  <param name="General/is_save_map" value="1" />
+  <param name="General/previous_map" value="" />
+  <param name="finish" value="false" />
+  <node pkg="voxel_slam" type="voxelslam" name="voxelslam" output="screen" />
+  <include file="$(find gnss_to_enu)/launch/record_voxel_enu.launch">
+    <arg name="use_auto_datum" value="$(arg use_auto_datum)" />
+    <arg name="datum_lat" value="$(arg datum_lat)" />
+    <arg name="datum_lon" value="$(arg datum_lon)" />
+    <arg name="datum_alt" value="$(arg datum_alt)" />
+    <arg name="record_dir" value="$(arg record_dir)" />
+    <arg name="fix_topic" value="$(arg fix_topic)" />
+    <arg name="use_sim_time" value="$(arg use_sim_time)" />
+    <arg name="xy_variance_max" value="$(arg xy_variance_max)" />
+    <arg name="z_variance_max" value="$(arg z_variance_max)" />
+  </include>
+  <node if="$(arg rviz)" pkg="rviz" type="rviz" name="rviz" args="-d $(find voxel_slam)/rviz_cfg/back.rviz" />
+</launch>

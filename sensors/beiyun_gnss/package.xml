@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>beiyun_gnss</name>
+  <version>0.1.0</version>
+  <description>ROS1 driver for Beiyun C2 GNSS NMEA output.</description>
+
+  <maintainer email="dev@muti-path-creater.invalid">muti_path_creater</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>roscpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <test_depend>gtest</test_depend>
+
+  <export>
+  </export>
+</package>

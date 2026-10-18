@@ -1,0 +1,9 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Editor and office temporary files
+.~*
+~$*
+*.swp
+*.swo
