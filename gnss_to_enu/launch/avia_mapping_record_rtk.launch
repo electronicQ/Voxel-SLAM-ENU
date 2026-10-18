@@ -20,6 +20,8 @@
   <param name="General/is_save_map" value="1" />
   <param name="General/previous_map" value="" />
   <param name="finish" value="false" />
+  <!-- Runtime requests: /finish=true runs final BA; /save_only=true skips it. -->
+  <param name="save_only" value="false" />
   <node pkg="voxel_slam" type="voxelslam" name="voxelslam" output="screen" />
   <include file="$(find gnss_to_enu)/launch/record_voxel_enu.launch">
     <arg name="use_auto_datum" value="$(arg use_auto_datum)" />

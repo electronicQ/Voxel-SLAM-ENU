@@ -2,10 +2,10 @@
 
 基于 Voxel-SLAM 的 ENU 坐标系地图导出工具。保留原有前后端估计与优化流程，新增 RTK 数据记录、天线杆臂补偿和轨迹 SVD 刚体配准，将最终点云地图转换至具有已知经纬高原点的 ENU 坐标系。
 
-本项目采用**离线对齐方案**：GNSS 不参与 Voxel-SLAM 的在线滤波或后端优化。建图及最终优化完成后，利用最终轨迹和 RTK 的时间对应关系求一个固定旋转、平移，再重建 ENU 地图。
+本项目采用**离线对齐方案**：GNSS 不参与 Voxel-SLAM 的在线滤波或后端优化。建图结束并完成轨迹保存后，利用最终保存的轨迹和 RTK 的时间对应关系求一个固定旋转、平移，再重建 ENU 地图。
 
 ```text
-LiDAR + IMU → Voxel-SLAM → 最终优化轨迹 + 逐帧 IMU 系点云
+LiDAR + IMU → Voxel-SLAM → 结束保存的轨迹 + 逐帧 IMU 系点云
                                      ↓
 RTK NavSatFix → ENU 位置记录 → 时间匹配、杆臂补偿、SVD 配准
                                      ↓
@@ -16,7 +16,7 @@ RTK NavSatFix → ENU 位置记录 → 时间匹配、杆臂补偿、SVD 配准
 
 - 默认使用第一条通过质量检查的 GNSS 数据作为 ENU 原点，也支持手动指定原点。
 - 记录 RTK 测量时间戳、ENU 位置、协方差和实际原点。
-- 基于最终优化轨迹进行位置线性插值、姿态 SLERP 和天线杆臂补偿。
+- 基于结束时保存的轨迹（可选最终全局 BA）进行位置线性插值、姿态 SLERP 和天线杆臂补偿。
 - 使用空间抽样、RANSAC 和加权 SVD 估计固定尺度的地图→ENU 刚体变换。
 - 用最终逐帧位姿重建 ENU 点云地图，输出全程配准残差。
 
@@ -98,16 +98,30 @@ use_auto_datum:=false datum_lat:=LAT_DEG datum_lon:=LON_DEG datum_alt:=HEIGHT_M
 rosbag play --clock /ABS/PATH/TO/flight01.bag
 ```
 
-### 3. 触发最终优化
+### 3. 结束建图并保存
 
-数据播放及积压处理完成后，在另一终端运行：
+数据播放及积压处理完成后，在另一终端选择以下一种方式。
+
+**只保存当前结果，跳过结束阶段的全局 BA：**
+
+```bash
+rosparam set /save_only true
+```
+
+**保留原有行为，先执行最终全局 BA，再保存：**
 
 ```bash
 rosparam set /finish true
 ```
 
-等待最终优化和保存完成，看到 `Final trajectory written: ...` 后再停止 launch。
-不要用直接 Ctrl+C 代替最终优化请求。`finish=true` 本身不代表优化结果已经成功。
+`/save_only` 不调用最终 `build_graph/topDownProcess`，保存已完成在线局部优化、回环处理的当前轨迹；
+在线局部 BA、回环及后台子图处理机制仍保留，已经开始的后台任务会结束后再释放数据。
+两参数同时被检测到时 `/finish` 优先；结束模式一旦选定不可中途切换。
+只保存模式要求启动时已启用 `General/is_save_map=1`（本 launch 已设置），否则无法补回此前没有保存的逐帧 PCD。
+
+等待后端队列处理及轨迹保存完成，看到 `Final trajectory written: ...` 后再停止 launch。
+不要用直接 Ctrl+C 代替上述请求。保存的扫描范围仍遵循原滑窗逻辑，尚未移出滑窗的尾部扫描不会额外补写。
+这里的地图保存是逐帧 PCD 加对应轨迹；合并后的 ENU 地图仍由下一步离线工具导出。
 
 最终轨迹位于 `maps/flight01/alidarState.txt`；同目录 `0.pcd`、`1.pcd` 等保存对应的 IMU 系点云。
 RTK 目录保存 `rtk_enu.csv` 与 `datum.json`。
@@ -126,7 +140,7 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 ```
 
 修改好 launch 默认值后，也可直接运行 `roslaunch gnss_to_enu align_voxel_enu.launch`。
-这是一次性离线任务，结束后进程退出，不持续订阅数据；不会自动触发或等待 SLAM 最终优化。
+这是一次性离线任务，结束后进程退出，不持续订阅数据；不会自动触发或等待 SLAM 结束保存。
 输出目录必须不存在。可传 `alignment_only:=true output:=/新的检查目录` 先检查配准；完整导出时另选新目录。
 原有 `rosrun gnss_to_enu align_voxel_enu.py --session ... --rtk ... --output ... --lever-arm LX LY LZ` 用法仍保留。
 默认拟合样本间三维距离为 1 m，全部时间匹配数据参与误差检查。可使用 `--sample-distance` 调整抽样距离。

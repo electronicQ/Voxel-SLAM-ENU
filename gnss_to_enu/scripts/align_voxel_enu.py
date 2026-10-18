@@ -334,7 +334,7 @@ def run_ros():
         raise ValueError('~alignment_only must be a ROS boolean')
     if alignment_only:
         argv.append('--alignment-only')
-    rospy.loginfo('Starting offline ENU alignment; final SLAM optimization must already be complete')
+    rospy.loginfo('Starting offline ENU alignment; SLAM trajectory saving must already be complete')
     main(argv)
     rospy.loginfo('Offline ENU alignment finished successfully')
 

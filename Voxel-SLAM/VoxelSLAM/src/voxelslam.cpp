@@ -1,4 +1,5 @@
 #include "voxelslam.hpp"
+#include <atomic>
 
 using namespace std;
 
@@ -766,7 +767,11 @@ public:
   vector<int> cnct_map;
   mutex mtx_keyframe;
   PGO_Edges gba_edges1, gba_edges2;
-  bool is_finish = false;
+  std::atomic<bool> is_finish{false};
+  // Written before publishing is_finish; immutable once stopping begins.
+  bool save_without_global_ba = false;
+  std::atomic<bool> stop_global_mapping{false};
+  std::atomic<bool> global_mapping_done{false};
 
   vector<string> sessionNames;
   string bagname, savepath;
@@ -1493,9 +1498,24 @@ public:
         loop_update(); last_pos = x_curr.p; jour = 0;
       }
       
-      n.param<bool>("finish", is_finish, false);
-      if(is_finish)
+      bool finish_requested = false, save_only_requested = false;
+      n.param<bool>("finish", finish_requested, false);
+      n.param<bool>("save_only", save_only_requested, false);
+      if(save_only_requested && !finish_requested && !is_save_map)
       {
+        ROS_ERROR_THROTTLE(5.0, "save_only requires General/is_save_map=1 from startup to retain frame PCDs; request ignored");
+        save_only_requested = false;
+      }
+      if(finish_requested || save_only_requested)
+      {
+        // Preserve /finish priority if both requests are set.
+        save_without_global_ba = save_only_requested && !finish_requested;
+        if(save_without_global_ba)
+          stop_global_mapping.store(true);
+        ROS_INFO_STREAM((save_without_global_ba
+                        ? "Stopping to save current map poses without final global BA"
+                        : "Stopping for final global BA and map saving"));
+        is_finish.store(true);
         break;
       }
 
@@ -1904,7 +1924,7 @@ public:
         break;
       }
 
-      if(buf_lba2loop.empty() || loop_detect == 1)
+      if(buf_lba2loop.empty() || (loop_detect == 1 && !is_finish.load()))
       {
         sleep(0.01); continue;
       }
@@ -2190,11 +2210,20 @@ public:
 
     }
 
+    if(save_without_global_ba)
+    {
+      // Let any in-flight background submap work finish before freeing shared data.
+      stop_global_mapping.store(true);
+      while(!global_mapping_done.load())
+        ros::WallDuration(0.01).sleep();
+      ROS_INFO("save_only: skipping final build_graph/topDownProcess; saving current poses");
+    }
+
     for(int i=0; i<std_managers.size(); i++)
       delete std_managers[i];
     malloc_trim(0);
 
-    if(is_finish)
+    if(is_finish && !save_without_global_ba)
     {
       if(keyframes->empty())
       {
@@ -2513,7 +2542,7 @@ public:
     int mgsize = 5;
     int thread_num = 5;
 
-    while(n.ok())
+    while(n.ok() && !stop_global_mapping.load())
     {
       if(multimap_keyframes.empty())
       {
@@ -2605,6 +2634,10 @@ public:
   
     }
 
+    for(Keyframe *submap: gba_submaps)
+      delete submap;
+    gba_submaps.clear();
+    global_mapping_done.store(true);
   }
 
 };

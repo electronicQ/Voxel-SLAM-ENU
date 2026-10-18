@@ -7,3 +7,6 @@ __pycache__/
 ~$*
 *.swp
 *.swo
+
+# Catkin workspace entry generated locally
+/CMakeLists.txt

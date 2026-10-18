@@ -1,6 +1,6 @@
 # Voxel-SLAM 离线 ENU 地图导出（ROS1）
 
-方案二：Voxel-SLAM 独立建图并完成回环/最终优化；GNSS 不进入其前端或后端。
+方案二：Voxel-SLAM 独立建图，结束时可选择只保存或先做最终全局 BA 再保存；GNSS 不进入其前端或后端。
 用最终轨迹和同时间 RTK 天线位置求固定 SE(3)，随后按最终位姿重建 ENU 地图。
 刚体对齐不修复地图内部漂移。默认只处理单次、新建 session，不加载 previous_map。
 
@@ -66,17 +66,26 @@ CSV 记录发生在发布节流之前，保留全部通过质量门限的观测�
 两个新增 launch 默认均开启自动原点，并将 `use_auto_datum` 传递给转换节点。
 CSV 保存原始 Z 方差；旧 Odometry 发布的 Z×10 逻辑保留，不影响本离线工具。
 
-## 3. 结束并等待最终优化
+## 3. 结束并保存（两种模式）
 
-等待 bag 播放完成、积压数据处理完成后：
+等待 bag 播放完成、积压数据处理完成后，选择一种请求：
 
 ```bash
+# 新增：只保存当前轨迹及已有逐帧地图，不执行最终全局 BA
+rosparam set /save_only true
+
+# 原有：执行最终全局 BA 后保存
 rosparam set /finish true
 ```
 
-不要直接 Ctrl+C 结束建图。等待最终优化结束并打印 `Final trajectory written: ...`。
-`finish=true` 是触发请求，不是优化成功的证明；检查控制台、轨迹和实际地图效果。
-本工具不会在轨迹仍写入时自动启动。完成保存后才停止 launch。
+这两个命令是替代选项，不要先后一起执行。同次检测到时 `/finish` 优先，结束模式选定后不再切换。
+`/save_only` 会结束前端并等待后端队列处理完成，停止后台子图线程后保存当前位姿，
+不进入最终 `build_graph/topDownProcess`。它不禁用此前在线局部 BA、回环优化或已经启动的后台子图任务。
+`General/is_save_map=1` 必须在建图启动时启用，否则只保存请求被拒绝并提示重启配置；本方案 launch 已启用。
+
+不要直接 Ctrl+C 结束建图。等待打印 `Final trajectory written: ...`，检查轨迹文件后再停止 launch。
+地图仍以原有逐帧 PCD 和对应轨迹保存；后续离线导出才合并成 ENU 地图。
+本工具不会在轨迹仍写入时自动启动。未移出滑窗的尾部扫描仍遵循原保存范围，不额外补写。
 
 session 目录格式为：
 
@@ -121,8 +130,8 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 
 `alignment_only:=true` 为仅检查配准，`datum` 留空使用 RTK CSV 旁的 `datum.json`。
 其他参数与下面 CLI 表格一致，但使用下划线名称，例如 `time_offset`、`max_rmse`。
-节点从 ROS 私有参数读取配置，执行一次后退出。它不会等待或触发 Voxel-SLAM 的最终优化，
-需确认最终轨迹已保存再启动。输出目录必须是新目录。路径通过 ROS 参数传入，不受命令行空格拆分影响。
+节点从 ROS 私有参数读取配置，执行一次后退出。它不会等待或触发 Voxel-SLAM 的结束保存，
+需确认通过 `/finish` 或 `/save_only` 完成轨迹保存后再启动。输出目录必须是新目录。路径通过 ROS 参数传入，不受命令行空格拆分影响。
 
 ### 命令行入口（仍支持，无需 ROS 也可直接用 Python）
 
@@ -152,7 +161,7 @@ rosrun gnss_to_enu align_voxel_enu.py \
 
 算法：
 
-1. 用最终优化轨迹做位置线性插值和姿态 SLERP；不外推，也不使用在线旧位姿。
+1. 用结束时保存的轨迹（可选最终全局 BA）做位置线性插值和姿态 SLERP；不外推，也不使用另行记录的在线旧位姿。
 2. `a_map = p_map_imu + R_map_imu * lever_arm`，与同时间 ENU 天线点配对。
 3. 默认相邻拟合样本相距至少 1 m（3D 距离）；完整匹配数据保留用于验收。
 4. 固定尺度为 1，用确定性 RANSAC + 加权 SVD 求 `p_enu = R * p_map + t`。

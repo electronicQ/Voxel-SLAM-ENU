@@ -1,5 +1,5 @@
 <launch>
-  <!-- Run only AFTER Voxel-SLAM final optimization and trajectory saving. -->
+  <!-- Run only AFTER Voxel-SLAM trajectory saving (/finish or /save_only) completes. -->
   <!-- Edit defaults below for your deployment, or override with name:=value. -->
   <arg name="session" default="$(env HOME)/voxel_enu_data/maps/flight01" />
   <arg name="rtk" default="$(env HOME)/voxel_enu_data/rtk_flight01/rtk_enu.csv" />

@@ -3,6 +3,7 @@
 
 	<rosparam command="load" file="$(find voxel_slam)/config/avia.yaml"/>
 	<param name="finish" value="false"/>
+	<param name="save_only" value="false"/>
 	<node pkg="voxel_slam" type="voxelslam" name="voxelslam" output="screen" > </node>
   
 	<group if="$(arg rviz)">
