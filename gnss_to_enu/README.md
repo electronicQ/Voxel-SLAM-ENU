@@ -30,7 +30,7 @@ source devel/setup.bash
 下面是自动原点模式命令格式，替换所有大写路径占位值：
 
 ```bash
-roslaunch gnss_to_enu voxel_enu_mapping.launch \
+roslaunch gnss_to_enu avia_mapping_record_rtk.launch \
   config:=/ABS/PATH/TO/lidar_config.yaml \
   save_path:=/ABS/PATH/TO/maps/ bagname:=flight01 \
   record_dir:=/ABS/PATH/TO/rtk_flight01 \
@@ -105,7 +105,9 @@ PCD 中是去畸变后的 IMU 系点，最终位姿为 IMU→地图；导出时�
 roslaunch gnss_to_enu align_voxel_enu.launch
 ```
 
-默认路径为 `$HOME/voxel_enu_data` 下的 flight01；杆臂默认零仅是占位值，需按实际测量修改。
+默认路径为 `$HOME/voxel_enu_data` 下的 flight01；默认 IMU→天线杆臂为 `[-0.30835, 0.07326, 0.07160]` m。
+计算依据为天线在雷达系下坐标 `[-0.35, 0.05, 0.1]` m、Avia 的单位旋转及
+LiDAR→IMU 平移 `[0.04165, 0.02326, -0.0284]` m。更换安装或外参后需重新计算。
 也可在启动时覆盖任一参数，例如：
 
 ```bash

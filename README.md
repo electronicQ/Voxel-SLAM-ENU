@@ -73,7 +73,7 @@ RTK 输入默认为 `/rtk/navsatfix`（`sensor_msgs/NavSatFix`）。如需使用
 
 ```bash
 mkdir -p "$HOME/voxel_enu_data/maps"
-roslaunch gnss_to_enu voxel_enu_mapping.launch \
+roslaunch gnss_to_enu avia_mapping_record_rtk.launch \
   save_path:="$HOME/voxel_enu_data/maps/" \
   bagname:=flight01 \
   record_dir:="$HOME/voxel_enu_data/rtk_flight01" \
@@ -115,7 +115,8 @@ RTK 目录保存 `rtk_enu.csv` 与 `datum.json`。
 ### 4. 对齐并导出
 
 推荐使用 [align_voxel_enu.launch](gnss_to_enu/launch/align_voxel_enu.launch)，将路径、杆臂和门限保存在 launch 顶部的 `arg default` 中。
-默认路径使用 `$HOME/voxel_enu_data`，默认杆臂为零占位值，部署前务必改成实际值。
+默认路径使用 `$HOME/voxel_enu_data`，默认 IMU→天线杆臂为 `[-0.30835, 0.07326, 0.07160]` m，
+由当前 Avia 外参与天线在雷达系下的坐标 `[-0.35, 0.05, 0.1]` m 计算得到。更换安装或外参后需重新计算。
 替换下面 `LX LY LZ`：它们是从 IMU 原点指向 GNSS 天线参考点、表达在 IMU 坐标系中的三维杆臂，单位米。
 不需要 GNSS 旋转外参；不要将 LiDAR→IMU 平移直接当作 GNSS 杆臂。
 

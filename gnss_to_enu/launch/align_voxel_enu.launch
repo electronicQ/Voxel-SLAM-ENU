@@ -4,11 +4,13 @@
   <arg name="session" default="$(env HOME)/voxel_enu_data/maps/flight01" />
   <arg name="rtk" default="$(env HOME)/voxel_enu_data/rtk_flight01/rtk_enu.csv" />
   <arg name="output" default="$(env HOME)/voxel_enu_data/enu_flight01" />
-  <!-- IMU origin -> antenna, in IMU axes, metres. Zero is a placeholder:
-       replace with measured lever arm unless antenna and IMU origins coincide. -->
-  <arg name="lever_x" default="0.0" />
-  <arg name="lever_y" default="0.0" />
-  <arg name="lever_z" default="0.0" />
+  <!-- IMU origin -> antenna, in IMU axes, metres.
+       Antenna in LiDAR: [-0.35, 0.05, 0.1]. Avia R_IL=I,
+       t_IL=[0.04165, 0.02326, -0.0284]; lever_I=R_IL*antenna_L+t_IL.
+       Recompute if the antenna mounting or LiDAR-to-IMU extrinsics change. -->
+  <arg name="lever_x" default="-0.30835" />
+  <arg name="lever_y" default="0.07326" />
+  <arg name="lever_z" default="0.07160" />
   <!-- Empty datum means datum.json beside the RTK CSV. -->
   <arg name="datum" default="" />
   <arg name="alignment_only" default="false" />

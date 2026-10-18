@@ -1,4 +1,5 @@
 <launch>
+  <!-- Livox Avia mapping + RTK recording; offline ENU export is a separate step. -->
   <arg name="config" default="$(find voxel_slam)/config/avia_fly.yaml" />
   <arg name="save_path" /> <!-- Existing writable directory, with trailing /. -->
   <arg name="bagname" />   <!-- New session directory name. -->
