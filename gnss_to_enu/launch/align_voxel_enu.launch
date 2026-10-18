@@ -1,28 +1,90 @@
 <launch>
-  <!-- Run only AFTER Voxel-SLAM trajectory saving (/finish or /save_only) completes. -->
-  <!-- Edit defaults below for your deployment, or override with name:=value. -->
+  <!-- 离线一次性任务：先完成 Voxel-SLAM 结束保存，再单独运行本 launch。
+       可编辑下方 default，或启动时用 参数名:=值 覆盖。
+       放宽门限仅改变接受条件，不会修复时间错位、杆臂错误或地图内部漂移。 -->
+
+  <!-- Voxel-SLAM session 目录，包含结束时保存的轨迹及逐帧 PCD。 -->
   <arg name="session" default="$(env HOME)/voxel_enu_data/maps/flight01" />
+
+  <!-- 建图同时记录的 RTK ENU CSV 文件。 -->
   <arg name="rtk" default="$(env HOME)/voxel_enu_data/rtk_flight01/rtk_enu.csv" />
+
+  <!-- 输出目录，必须是尚不存在的新目录。 -->
   <arg name="output" default="$(env HOME)/voxel_enu_data/enu_flight01" />
-  <!-- IMU origin -> antenna, in IMU axes, metres.
-       Antenna in LiDAR: [-0.35, 0.05, 0.1]. Avia R_IL=I,
-       t_IL=[0.04165, 0.02326, -0.0284]; lever_I=R_IL*antenna_L+t_IL.
-       Recompute if the antenna mounting or LiDAR-to-IMU extrinsics change. -->
+
+  <!-- IMU 原点指向 GNSS 天线参考点的杆臂，表达在 IMU 系，单位 m。
+       天线在 LiDAR 系 [-0.35, 0.05, 0.1]，Avia R_IL=I，
+       t_IL=[0.04165, 0.02326, -0.0284]；lever_I=R_IL*antenna_L+t_IL。
+       更换天线安装或 LiDAR 到 IMU 外参后需重新计算。 -->
   <arg name="lever_x" default="-0.30835" />
+
   <arg name="lever_y" default="0.07326" />
+
   <arg name="lever_z" default="0.07160" />
-  <!-- Empty datum means datum.json beside the RTK CSV. -->
+
+  <!-- ENU 原点元数据路径；留空使用 RTK CSV 同目录的 datum.json。 -->
   <arg name="datum" default="" />
+
+  <!-- true：只输出配准结果和诊断，不读取 PCD；false：继续导出 ENU 地图。 -->
   <arg name="alignment_only" default="false" />
-  <!-- t_map = t_RTK + time_offset -->
+
+  <!-- RTK 与地图轨迹的固定时间偏移，单位 s，可正可负。
+       对应关系：t_map = t_RTK + time_offset。
+       增大表示同一 RTK 点匹配更晚的 SLAM 位姿，减小表示匹配更早的位姿。
+       已统一时间基准时用 0；不属于宽容门限，错误偏移会引入与运动有关的残差。 -->
   <arg name="time_offset" default="0.0" />
+
+  <!-- 位置线性插值、姿态 SLERP 所允许的相邻 SLAM 位姿最大时间间隔，单位 s，必须大于 0。
+       越大：允许跨更长的轨迹间隔插值，可能匹配更多 RTK 点，但插值误差风险更高。
+       越小：只允许更密集的轨迹区间，时间匹配更严格，可能导致可用点不足。
+       精确命中轨迹时间戳时不受此间隔限制；任何取值都不允许轨迹范围外的外推。 -->
   <arg name="max_gap" default="0.25" />
+
+  <!-- 拟合样本的空间抽样间距，单位 m，必须非负。
+       按时间顺序，当前 ENU 天线点距上一个选中点的三维距离达到此值才选中。
+       越大：拟合点通常更少、计算更省，但可能丢失转弯细节或点数不足。
+       越小：拟合点通常更多、计算更多，密集航段的影响可能增加；0 表示使用全部匹配点。
+       只影响拟合点选择，不减少最终地图点数；全部匹配点仍参与误差验收。
+       此步骤不按协方差优选附近点，协方差用于后续 SVD 加权。 -->
   <arg name="sample_distance" default="1.0" />
-  <arg name="inlier_threshold" default="0.5" />
+
+  <!-- 内点判定的三维欧氏残差门限，单位 m，必须大于 0。
+       残差为变换后的 SLAM 天线位置与对应 RTK ENU 天线位置的三维距离。
+       越大：更多点可能被判为内点，较宽容，但异常点和漂移更容易被接纳。
+       越小：内点一致性要求更严格，可能报 Insufficient alignment inliers。
+       同时用于 RANSAC、最终内点重判，以及全部匹配点的内点比例统计。
+       放宽此门限不会自动减小真实配准误差，也不等于提高精度。 -->
+  <arg name="inlier_threshold" default="1.0" />
+
+  <!-- 最少拟合内点对数，整数，至少为 3。
+       空间抽样后点数及最终拟合内点数均需达到此值。
+       越大：要求更多数据支持结果，更严格，短轨迹更容易失败。
+       越小：少量点也可通过，但可靠性更难保证；点数够仍不能解决共线退化。
+       不改变 RANSAC 每次随机抽取的数量，该数量固定为 3 对。 -->
   <arg name="min_pairs" default="10" />
-  <arg name="min_inlier_ratio" default="0.7" />
-  <arg name="max_rmse" default="0.3" />
+
+  <!-- 最低内点比例，范围 (0,1]；0.5 表示至少 50%。
+       同时检查抽样拟合点的内点比例，以及全部时间匹配点的内点比例。
+       越大：要求更大范围的轨迹一致，更严格；越小：允许更多外点，较宽容。
+       过小可能使局部航段拟合很好、其他航段明显错位的结果通过。
+       与 min_pairs 必须同时满足，不是二选一。 -->
+  <arg name="min_inlier_ratio" default="0.5" />
+
+  <!-- 最终拟合内点的三维残差 RMSE 上限，单位 m，必须大于 0。
+       越大：允许更大的平均拟合误差，更容易通过最终验收。
+       越小：精度要求更高，可能报 Alignment failed quality gate。
+       仅是结果验收门限，不参与 SVD 求解或内点选择，因此不能直接解决内点不足。
+       此处检查的是抽样拟合内点，不是全部点的 all_rmse_m；应同时查看全程误差报告。 -->
+  <arg name="max_rmse" default="0.6" />
+
+  <!-- RANSAC 随机试算次数，非负整数；每次抽 3 对点并用 SVD 求候选 RT。
+       越大：找到一致候选的机会更高，但计算更慢；越小：更快，但较易漏掉好候选。
+       不改变残差门限，不保证增加次数就能改善结果。
+       0 表示只尝试一次全部拟合样本的加权 SVD 初值，关闭随机抽样尝试。
+       使用固定随机种子便于复现；选出内点后的重拟合另有最多 10 次迭代，不由此参数控制。 -->
   <arg name="ransac_trials" default="500" />
+
+  <!-- 将上述配置传入节点的 ROS 私有参数；只需修改上方 arg，无需重复修改下方映射。 -->
   <node pkg="gnss_to_enu" type="align_voxel_enu.py" name="align_voxel_enu"
         args="--ros-params" output="screen">
     <param name="session" value="$(arg session)" type="str" />

@@ -168,7 +168,7 @@ python3 -m unittest discover -s gnss_to_enu/tests -v
 ```
 
 已通过 7 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建，自动/手动原点记录及 ROS 参数入口映射。
-已检查 Python 语法和 launch XML；**尚未完成 ROS1 编译和真实 rosbag/板卡回放验证**。
+已检查 Python 语法和 launch XML，并已在 ROS1 环境测试通过。
 
 ## 上游与许可证
 
