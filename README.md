@@ -43,12 +43,12 @@ src/
 目标部署环境为 Ubuntu 20.04、ROS1 Noetic、Python 3.8+。
 Voxel-SLAM 还需要 Eigen、PCL、GTSAM、Livox SDK 等依赖，具体参考 [Voxel-SLAM 原说明](Voxel-SLAM/README.md)和 [Livox 驱动说明](sensors/livox_ros_driver/README_CN.md)。离线工具依赖 NumPy。
 
-把仓库克隆为一个新工作空间的 `src` 目录（替换仓库地址）：
+把仓库克隆为一个新工作空间的 `src` 目录：
 
 ```bash
 mkdir -p ~/voxel_enu_ws
 cd ~/voxel_enu_ws
-git clone <YOUR_REPOSITORY_URL> src
+git clone git@github.com:electronicQ/Voxel-SLAM-ENU.git src
 sudo apt install python3-numpy
 # 完成原工程其他依赖安装后：
 source /opt/ros/noetic/setup.bash
