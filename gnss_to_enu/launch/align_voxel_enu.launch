@@ -1,0 +1,41 @@
+<launch>
+  <!-- Run only AFTER Voxel-SLAM final optimization and trajectory saving. -->
+  <!-- Edit defaults below for your deployment, or override with name:=value. -->
+  <arg name="session" default="$(env HOME)/voxel_enu_data/maps/flight01" />
+  <arg name="rtk" default="$(env HOME)/voxel_enu_data/rtk_flight01/rtk_enu.csv" />
+  <arg name="output" default="$(env HOME)/voxel_enu_data/enu_flight01" />
+  <!-- IMU origin -> antenna, in IMU axes, metres. Zero is a placeholder:
+       replace with measured lever arm unless antenna and IMU origins coincide. -->
+  <arg name="lever_x" default="0.0" />
+  <arg name="lever_y" default="0.0" />
+  <arg name="lever_z" default="0.0" />
+  <!-- Empty datum means datum.json beside the RTK CSV. -->
+  <arg name="datum" default="" />
+  <arg name="alignment_only" default="false" />
+  <!-- t_map = t_RTK + time_offset -->
+  <arg name="time_offset" default="0.0" />
+  <arg name="max_gap" default="0.25" />
+  <arg name="sample_distance" default="1.0" />
+  <arg name="inlier_threshold" default="0.5" />
+  <arg name="min_pairs" default="10" />
+  <arg name="min_inlier_ratio" default="0.7" />
+  <arg name="max_rmse" default="0.3" />
+  <arg name="ransac_trials" default="500" />
+  <node pkg="gnss_to_enu" type="align_voxel_enu.py" name="align_voxel_enu"
+        args="--ros-params" output="screen">
+    <param name="session" value="$(arg session)" type="str" />
+    <param name="rtk" value="$(arg rtk)" type="str" />
+    <param name="output" value="$(arg output)" type="str" />
+    <param name="datum" value="$(arg datum)" type="str" />
+    <rosparam param="lever_arm" subst_value="true">[$(arg lever_x), $(arg lever_y), $(arg lever_z)]</rosparam>
+    <param name="alignment_only" value="$(arg alignment_only)" type="bool" />
+    <param name="time_offset" value="$(arg time_offset)" type="double" />
+    <param name="max_gap" value="$(arg max_gap)" type="double" />
+    <param name="sample_distance" value="$(arg sample_distance)" type="double" />
+    <param name="inlier_threshold" value="$(arg inlier_threshold)" type="double" />
+    <param name="min_pairs" value="$(arg min_pairs)" type="int" />
+    <param name="min_inlier_ratio" value="$(arg min_inlier_ratio)" type="double" />
+    <param name="max_rmse" value="$(arg max_rmse)" type="double" />
+    <param name="ransac_trials" value="$(arg ransac_trials)" type="int" />
+  </node>
+</launch>

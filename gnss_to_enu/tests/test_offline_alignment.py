@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 import numpy as np
 
 SCRIPT = Path(__file__).resolve().parents[1]/'scripts'/'align_voxel_enu.py'
@@ -14,6 +16,23 @@ spec.loader.exec_module(a)
 
 
 class AlignmentTests(unittest.TestCase):
+    def test_ros_parameter_entrypoint(self):
+        params={'~session':'/data/session with spaces', '~rtk':'/data/rtk.csv',
+                '~output':'/data/enu', '~lever_arm':[.1,-.2,.3], '~alignment_only':True,
+                '~sample_distance':2., '~datum':'/data/datum.json'}
+        ros=SimpleNamespace(init_node=lambda name:None, loginfo=lambda msg:None,
+                            get_param=lambda key,*default:params[key] if key in params else default[0])
+        with patch.dict('sys.modules', {'rospy':ros}), patch.object(a,'main') as main:
+            a.run_ros()
+            argv=main.call_args[0][0]
+            self.assertEqual(argv[argv.index('--session')+1],'/data/session with spaces')
+            self.assertEqual(argv[argv.index('--lever-arm')+1:argv.index('--lever-arm')+4],['0.1','-0.2','0.3'])
+            self.assertIn('--alignment-only',argv)
+            self.assertEqual(argv[argv.index('--sample-distance')+1],'2.0')
+            self.assertEqual(argv[argv.index('--datum')+1],'/data/datum.json')
+            params['~alignment_only']='false'
+            with self.assertRaises(ValueError): a.run_ros()
+
     def test_slerp_gap_bounds_and_antipodes(self):
         poses = np.array([[1,0,0,0,0,0,0,1], [1.1,2,0,0,0,0,1,0]], dtype=float)
         p,r = a.interpolate(poses, 1.05, .2)

@@ -311,9 +311,40 @@ def main(argv=None):
     print(json.dumps(report, indent=2))
 
 
+def run_ros():
+    """One-shot ROS1 entry point; the numerical CLI remains usable without ROS."""
+    import rospy
+    rospy.init_node('align_voxel_enu')
+    argv = []
+    for name in ('session', 'rtk', 'output'):
+        argv.extend(['--'+name, str(rospy.get_param('~'+name))])
+    lever = rospy.get_param('~lever_arm')
+    if not isinstance(lever, list) or len(lever) != 3:
+        raise ValueError('~lever_arm must contain three IMU-frame metre values')
+    argv.extend(['--lever-arm', *map(str, lever)])
+    for name, default in (('time_offset', 0.), ('max_gap', .25), ('sample_distance', 1.),
+                          ('inlier_threshold', .5), ('min_pairs', 10),
+                          ('min_inlier_ratio', .7), ('max_rmse', .3), ('ransac_trials', 500)):
+        argv.extend(['--'+name.replace('_', '-'), str(rospy.get_param('~'+name, default))])
+    datum = rospy.get_param('~datum', '')
+    if datum:
+        argv.extend(['--datum', datum])
+    alignment_only = rospy.get_param('~alignment_only', False)
+    if not isinstance(alignment_only, bool):
+        raise ValueError('~alignment_only must be a ROS boolean')
+    if alignment_only:
+        argv.append('--alignment-only')
+    rospy.loginfo('Starting offline ENU alignment; final SLAM optimization must already be complete')
+    main(argv)
+    rospy.loginfo('Offline ENU alignment finished successfully')
+
+
 if __name__ == '__main__':
     try:
-        main()
+        if '--ros-params' in sys.argv[1:]:
+            run_ros()
+        else:
+            main()
     except (ValueError, OSError, KeyError) as exc:
         print('ENU alignment failed: '+str(exc), file=sys.stderr)
         sys.exit(1)

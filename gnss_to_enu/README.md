@@ -96,6 +96,34 @@ PCD 中是去畸变后的 IMU 系点，最终位姿为 IMU→地图；导出时�
 
 ## 4. 离线对齐和导出
 
+### ROS1 launch 入口（推荐）
+
+编辑 `launch/align_voxel_enu.launch` 顶部的 `arg default`，设置 session、RTK CSV、输出路径、
+实际杆臂以及匹配门限，然后运行：
+
+```bash
+roslaunch gnss_to_enu align_voxel_enu.launch
+```
+
+默认路径为 `$HOME/voxel_enu_data` 下的 flight01；杆臂默认零仅是占位值，需按实际测量修改。
+也可在启动时覆盖任一参数，例如：
+
+```bash
+roslaunch gnss_to_enu align_voxel_enu.launch \
+  session:=/ABS/PATH/TO/maps/flight01 \
+  rtk:=/ABS/PATH/TO/rtk_flight01/rtk_enu.csv \
+  output:=/ABS/PATH/TO/enu_flight01 \
+  lever_x:=LX lever_y:=LY lever_z:=LZ \
+  sample_distance:=1.0 alignment_only:=false
+```
+
+`alignment_only:=true` 为仅检查配准，`datum` 留空使用 RTK CSV 旁的 `datum.json`。
+其他参数与下面 CLI 表格一致，但使用下划线名称，例如 `time_offset`、`max_rmse`。
+节点从 ROS 私有参数读取配置，执行一次后退出。它不会等待或触发 Voxel-SLAM 的最终优化，
+需确认最终轨迹已保存再启动。输出目录必须是新目录。路径通过 ROS 参数传入，不受命令行空格拆分影响。
+
+### 命令行入口（仍支持，无需 ROS 也可直接用 Python）
+
 先只做对齐并查看误差（不需要读取 PCD）：
 
 ```bash

@@ -114,18 +114,20 @@ RTK 目录保存 `rtk_enu.csv` 与 `datum.json`。
 
 ### 4. 对齐并导出
 
+推荐使用 [align_voxel_enu.launch](gnss_to_enu/launch/align_voxel_enu.launch)，将路径、杆臂和门限保存在 launch 顶部的 `arg default` 中。
+默认路径使用 `$HOME/voxel_enu_data`，默认杆臂为零占位值，部署前务必改成实际值。
 替换下面 `LX LY LZ`：它们是从 IMU 原点指向 GNSS 天线参考点、表达在 IMU 坐标系中的三维杆臂，单位米。
 不需要 GNSS 旋转外参；不要将 LiDAR→IMU 平移直接当作 GNSS 杆臂。
 
 ```bash
-rosrun gnss_to_enu align_voxel_enu.py \
-  --session "$HOME/voxel_enu_data/maps/flight01" \
-  --rtk "$HOME/voxel_enu_data/rtk_flight01/rtk_enu.csv" \
-  --output "$HOME/voxel_enu_data/enu_flight01" \
-  --lever-arm LX LY LZ
+roslaunch gnss_to_enu align_voxel_enu.launch \
+  lever_x:=LX lever_y:=LY lever_z:=LZ
 ```
 
-输出目录必须不存在。可加 `--alignment-only` 先检查配准；完整导出时另选新的输出目录。
+修改好 launch 默认值后，也可直接运行 `roslaunch gnss_to_enu align_voxel_enu.launch`。
+这是一次性离线任务，结束后进程退出，不持续订阅数据；不会自动触发或等待 SLAM 最终优化。
+输出目录必须不存在。可传 `alignment_only:=true output:=/新的检查目录` 先检查配准；完整导出时另选新目录。
+原有 `rosrun gnss_to_enu align_voxel_enu.py --session ... --rtk ... --output ... --lever-arm LX LY LZ` 用法仍保留。
 默认拟合样本间三维距离为 1 m，全部时间匹配数据参与误差检查。可使用 `--sample-distance` 调整抽样距离。
 工具不进行尺度缩放、不使用 ICP 最近邻配对，也不会重复施加 LiDAR 外参。
 参数门限、时间偏移符号及完整用法见 [ENU 工具说明](gnss_to_enu/README.md)。
@@ -150,7 +152,7 @@ rosrun gnss_to_enu align_voxel_enu.py \
 python3 -m unittest discover -s gnss_to_enu/tests -v
 ```
 
-已通过 6 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建，以及自动/手动原点记录。
+已通过 7 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建，自动/手动原点记录及 ROS 参数入口映射。
 已检查 Python 语法和 launch XML；**尚未完成 ROS1 编译和真实 rosbag/板卡回放验证**。
 
 ## 上游与许可证
