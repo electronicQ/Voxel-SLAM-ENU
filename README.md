@@ -145,6 +145,9 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 原有 `rosrun gnss_to_enu align_voxel_enu.py --session ... --rtk ... --output ... --lever-arm LX LY LZ` 用法仍保留。
 默认拟合样本间三维距离为 1 m，全部时间匹配数据参与误差检查。可使用 `--sample-distance` 调整抽样距离。
 工具不进行尺度缩放、不使用 ICP 最近邻配对，也不会重复施加 LiDAR 外参。
+如果前后段不可靠，可选用 `fit_start/fit_end` 指定可信中段、`max_xy_variance/max_z_variance` 过滤拟合点，
+并通过 `auto_time_offset` 搜索小范围时间偏移。默认仍为全程验收；显式选择 `validation_scope:=fit_window`
+只代表窗内质量通过，不代表地图全程准确。排查命令和原理见 [ENU 工具说明](gnss_to_enu/README.md#中段可信前后段有疑问时的拟合方式)。
 参数门限、时间偏移符号及完整用法见 [ENU 工具说明](gnss_to_enu/README.md)。
 
 ## 输出文件
@@ -158,7 +161,8 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 | `residuals.csv` | 全部匹配点的三轴及三维残差（存在候选变换时） |
 | `trajectory_comparison.png` | 无论配准通过或失败均输出的轨迹对比图 |
 | `diagnostic.json` | 图片所用变换的来源、是否通过验收及失败原因 |
-| `matched_pairs.csv` | 时间匹配后的地图系/ENU 天线点对 |
+| `matched_pairs.csv` | 时间匹配后的地图系/ENU 天线点对、原始方差、时间窗和质量标记 |
+| `time_offset_search.csv/png` | 自动搜索时间偏移时的代价和曲线 |
 
 完整导出成功时 `alignment.json.status` 为 `complete`。
 
@@ -185,8 +189,9 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 python3 -m unittest discover -s gnss_to_enu/tests -v
 ```
 
-已通过 8 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建，自动/手动原点记录及 ROS 参数入口映射。
-已检查 Python 语法和 launch XML，并已在 ROS1 环境测试通过。新增诊断绘图已通过合成数据测试，更新后的 ROS1 回放待验证。
+已通过 10 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建、自动/手动原点记录及 ROS 参数入口映射；
+还覆盖拟合时间窗、协方差筛选、自动恢复时间偏移和局部/全程验收区别。
+已检查 Python 语法和 launch XML，并已在 ROS1 环境测试通过。新增诊断绘图及时间窗/自动时间偏移功能已通过合成数据测试，更新后的 ROS1 回放待验证。
 
 ## 上游与许可证
 

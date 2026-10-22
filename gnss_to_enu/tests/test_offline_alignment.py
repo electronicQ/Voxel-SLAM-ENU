@@ -21,7 +21,8 @@ class AlignmentTests(unittest.TestCase):
     def test_ros_parameter_entrypoint(self):
         params={'~session':'/data/session with spaces', '~rtk':'/data/rtk.csv',
                 '~output':'/data/enu', '~lever_arm':[.1,-.2,.3], '~alignment_only':True,
-                '~sample_distance':2., '~datum':'/data/datum.json'}
+                '~sample_distance':2., '~datum':'/data/datum.json', '~auto_time_offset':True,
+                '~fit_start':100., '~fit_end':450., '~validation_scope':'fit_window'}
         ros=SimpleNamespace(init_node=lambda name:None, loginfo=lambda msg:None,
                             get_param=lambda key,*default:params[key] if key in params else default[0])
         with patch.dict('sys.modules', {'rospy':ros}), patch.object(a,'main') as main:
@@ -30,6 +31,9 @@ class AlignmentTests(unittest.TestCase):
             self.assertEqual(argv[argv.index('--session')+1],'/data/session with spaces')
             self.assertEqual(argv[argv.index('--lever-arm')+1:argv.index('--lever-arm')+4],['0.1','-0.2','0.3'])
             self.assertIn('--alignment-only',argv)
+            self.assertIn('--auto-time-offset',argv)
+            self.assertEqual(argv[argv.index('--fit-start')+1],'100.0')
+            self.assertEqual(argv[argv.index('--validation-scope')+1],'fit_window')
             self.assertEqual(argv[argv.index('--sample-distance')+1],'2.0')
             self.assertEqual(argv[argv.index('--datum')+1],'/data/datum.json')
             params['~alignment_only']='false'
@@ -162,6 +166,83 @@ class AlignmentTests(unittest.TestCase):
                     else:
                         self.assertIsNotNone(diag['candidate_T_enu_map'])
                         self.assertTrue((output/'residuals.csv').exists())
+
+    def test_window_covariance_and_auto_offset_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); session=root/'session'; session.mkdir()
+            relative=np.arange(0,60,.05)
+            stamps=1700000000.+relative
+            xyz=np.column_stack([8*np.sin(.18*relative)+.02*relative**2,
+                                 6*np.cos(.11*relative)+.1*relative, .01*relative**2])
+            yaw=.04*relative+.001*relative**2
+            poses=np.column_stack([stamps,xyz,np.zeros((len(stamps),2)),np.sin(yaw/2),np.cos(yaw/2)])
+            np.savetxt(session/'alidarState.txt',poses,fmt='%.12f')
+            (root/'datum.json').write_text(json.dumps({'latitude':22.,'longitude':113.,'altitude':10.}))
+            r=a.quaternion_matrix([.1,.2,.3,.9]); translation=np.array([50.,-10.,4.])
+            lever=np.array([.3,-.1,.2])
+            rt=1700000000.+np.arange(2,56,.3)
+            with (root/'rtk.csv').open('w') as f:
+                w=csv.writer(f);w.writerow(['timestamp','east','north','up','var_e','var_n','var_u'])
+                for i,stamp in enumerate(rt):
+                    p,rotation=a.interpolate(poses,stamp+1.,.1)
+                    y=r@(p+rotation@lever)+translation
+                    # End sections and one middle point have bad positions AND large covariance.
+                    bad=(stamp-rt[0]<10 or stamp-rt[0]>40 or i==70)
+                    if bad: y+=np.array([10.,-8.,3.])
+                    v=.25 if bad else .0004
+                    w.writerow([format(stamp,'.9f'),*y,v,v,v])
+            base=['--session',str(session),'--rtk',str(root/'rtk.csv'),'--lever-arm',*map(str,lever),
+                  '--alignment-only','--sample-distance','0','--fit-start','10','--fit-end','40',
+                  '--max-xy-variance','0.01','--max-z-variance','0.04','--auto-time-offset',
+                  '--offset-min','-1.5','--offset-max','1.5','--offset-step','0.1','--max-gap','0.1',
+                  '--inlier-threshold','0.05','--max-rmse','0.01','--min-inlier-ratio','0.8']
+            output=root/'local'
+            with contextlib.redirect_stdout(io.StringIO()):
+                a.main(base+['--output',str(output),'--validation-scope','fit_window'])
+            report=json.loads((output/'alignment.json').read_text())
+            self.assertAlmostEqual(report['time_offset_s'],1.)
+            self.assertEqual(report['fit_reference_rtk_timestamp'],rt[0])
+            self.assertEqual(report['validation_scope'],'fit_window')
+            self.assertIsNotNone(report['global_warning'])
+            self.assertLess(report['metrics']['all_inlier_ratio'],.8)
+            self.assertEqual(report['metrics']['validation_inlier_ratio'],1.)
+            transform=np.loadtxt(output/'T_enu_map.txt')
+            np.testing.assert_allclose(transform[:3,:3],r,atol=1e-8)
+            np.testing.assert_allclose(transform[:3,3],translation,atol=1e-8)
+            pairs=np.genfromtxt(output/'matched_pairs.csv',delimiter=',',names=True)
+            self.assertTrue(np.any(pairs['quality_pass']==0))
+            self.assertTrue(np.all(pairs['quality_pass'][pairs['fit_sample']>0]==1))
+            self.assertTrue(np.all(pairs['in_fit_window'][pairs['fit_sample']>0]==1))
+            self.assertTrue((output/'time_offset_search.csv').exists())
+            self.assertTrue((output/'time_offset_search.png').exists())
+            self.assertTrue((output/'trajectory_comparison.png').exists())
+            global_output=root/'global'
+            with self.assertRaises(ValueError), contextlib.redirect_stdout(io.StringIO()):
+                a.main(base+['--output',str(global_output)])
+            self.assertFalse((global_output/'T_enu_map.txt').exists())
+            self.assertEqual(json.loads((global_output/'alignment.json').read_text())['validation_scope'],'all')
+
+    def test_offset_search_rejects_boundary_and_unobservable_motion(self):
+        from argparse import Namespace
+        with tempfile.TemporaryDirectory() as tmp:
+            times=np.linspace(0,30,601)
+            # Circular constant-rate motion: changing time is indistinguishable from rotating the map.
+            positions=np.column_stack([10*np.cos(.2*times),10*np.sin(.2*times),np.zeros(len(times))])
+            poses=np.column_stack([times,positions,np.zeros((len(times),3)),np.ones(len(times))])
+            rt=np.arange(5,25,.5)
+            points=np.column_stack([10*np.cos(.2*(rt+1)),10*np.sin(.2*(rt+1)),np.zeros(len(rt))])
+            records=np.column_stack([rt,points,np.full((len(rt),3),.001)])
+            args=Namespace(offset_min=-2.,offset_max=2.,offset_step=.1,sample_distance=0.,
+                           max_gap=.1,lever_arm=[0,0,0],min_pairs=10,output=Path(tmp))
+            with self.assertRaisesRegex(ValueError,'unobservable'):
+                a.search_time_offset(poses,records,np.ones(len(rt),bool),np.ones(len(rt)),args)
+            # Nonconstant motion with true offset +1 outside a deliberately narrow search.
+            positions[:,0]+=.03*times**2
+            poses[:,1:4]=positions
+            records[:,1:4]=a.match_antenna(poses,records,1.,.1,[0,0,0])
+            args.offset_min=0.;args.offset_max=.5
+            with self.assertRaisesRegex(ValueError,'boundary'):
+                a.search_time_offset(poses,records,np.ones(len(rt),bool),np.ones(len(rt)),args)
 
     def test_binary_padding_ascii_and_truncation(self):
         with tempfile.TemporaryDirectory() as tmp:

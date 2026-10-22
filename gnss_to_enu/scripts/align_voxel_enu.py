@@ -202,16 +202,22 @@ def export_map(scan_dir, poses, rotation, translation, output):
 
 def trajectory_diagnostics(output, source, target, times, selected, threshold,
                            raw_source, raw_target, raw_map_times, raw_rtk_times,
-                           candidate=None, method='none', failure=None):
+                           candidate=None, method='none', failure=None, variances=None,
+                           fit_window=None, quality_pass=None, validation_scope='all'):
     """Plot every usable matched pair, including outliers; never validate a transform."""
     import matplotlib
     matplotlib.use('Agg')  # Works on a headless ROS computer, no display or plt.show().
     import matplotlib.pyplot as plt
     from matplotlib.collections import LineCollection
 
+    variances = np.full((len(source), 3), np.nan) if variances is None else variances
+    fit_window = np.ones(len(source), dtype=bool) if fit_window is None else fit_window
+    quality_pass = np.ones(len(source), dtype=bool) if quality_pass is None else quality_pass
     blue, orange = '#0072B2', '#D55E00'
     fig, axes = plt.subplots(2, 2, figsize=(15, 11), constrained_layout=True)
-    title = 'ALIGNMENT FAILED - diagnostic only' if failure else 'Alignment passed quality checks'
+    title = ('ALIGNMENT FAILED - diagnostic only' if failure else
+             ('LOCAL fit-window checks passed - whole trajectory NOT validated'
+              if validation_scope == 'fit_window' else 'Alignment passed whole-trajectory quality checks'))
     fig.suptitle(title+'\n'+(failure or 'All time-matched antenna positions; no outliers hidden'), fontsize=13)
 
     def tracks(ax, x, y, centered=False):
@@ -258,6 +264,10 @@ def trajectory_diagnostics(output, source, target, times, selected, threshold,
         axes[0, 1].set(title='After transform: '+method+' (gray = timestamp pairs)',
                        xlabel='East [m]', ylabel='North [m]')
         elapsed = np.asarray(times)-times[0]
+        if np.any(fit_window) and not np.all(fit_window):
+            for axis in axes[1]:
+                axis.axvspan(elapsed[fit_window][0], elapsed[fit_window][-1],
+                             color='green', alpha=.08, label='Fit time window')
         axes[1, 0].plot(elapsed, transformed[:, 2], '.-', color=blue, markersize=3, linewidth=.7, label='SLAM antenna')
         axes[1, 0].plot(elapsed, target[:, 2], '.-', color=orange, markersize=3, linewidth=.7, label='RTK antenna')
         axes[1, 0].set(title='Height after transform', xlabel='Time since first matched RTK [s]', ylabel='Up [m]')
@@ -298,6 +308,7 @@ def trajectory_diagnostics(output, source, target, times, selected, threshold,
                   'comparison':'time-matched antenna positions; all matched points included',
                   'candidate_method':method, 'candidate_validated':not bool(failure) and candidate is not None,
                   'matched':len(source), 'fit_points':len(selected), 'connector_limit':120,
+                  'validation_scope':validation_scope,
                   'candidate_T_enu_map':None}
     if candidate is not None:
         transform = np.eye(4)
@@ -307,16 +318,98 @@ def trajectory_diagnostics(output, source, target, times, selected, threshold,
     selected_set = set(selected.tolist())
     with (output/'matched_pairs.csv').open('w') as stream:
         writer = csv.writer(stream)
-        writer.writerow(['timestamp','map_x','map_y','map_z','rtk_e','rtk_n','rtk_u','fit_sample'])
+        writer.writerow(['timestamp','map_x','map_y','map_z','rtk_e','rtk_n','rtk_u','fit_sample',
+                         'var_e','var_n','var_u','in_fit_window','quality_pass'])
         for i, (stamp, p, q) in enumerate(zip(times, source, target)):
-            writer.writerow([format(stamp,'.9f'), *p, *q, int(i in selected_set)])
+            writer.writerow([format(stamp,'.9f'), *p, *q, int(i in selected_set),
+                             *variances[i], int(fit_window[i]), int(quality_pass[i])])
     if errors is not None:
         with (output/'residuals.csv').open('w') as stream:
             writer = csv.writer(stream)
-            writer.writerow(['timestamp','dx','dy','dz','norm','fit_sample','inlier'])
+            writer.writerow(['timestamp','dx','dy','dz','norm','fit_sample','inlier','in_fit_window','quality_pass'])
             for i, (stamp, residual, err) in enumerate(zip(times, residuals, errors)):
-                writer.writerow([format(stamp,'.9f'), *residual, err, int(i in selected_set), int(err <= threshold)])
+                writer.writerow([format(stamp,'.9f'), *residual, err, int(i in selected_set), int(err <= threshold),
+                                 int(fit_window[i]), int(quality_pass[i])])
     print('Trajectory diagnostic image: '+str((output/'trajectory_comparison.png').resolve()))
+
+
+def match_antenna(poses, records, offset, max_gap, lever_arm):
+    """One output per RTK record; NaNs denote missing temporal support."""
+    points = np.full((len(records), 3), np.nan)
+    for i, record in enumerate(records):
+        pose = interpolate(poses, record[0]+offset, max_gap)
+        if pose is not None:
+            position, rotation = pose
+            points[i] = position+rotation@lever_arm
+    return points
+
+
+def spatial_samples(target, eligible, distance):
+    selected, last = [], None
+    for i in np.flatnonzero(eligible):
+        if last is None or np.linalg.norm(target[i]-last) >= distance:
+            selected.append(i)
+            last = target[i]
+    return np.asarray(selected, dtype=int)
+
+
+def search_time_offset(poses, records, eligible, weights, args):
+    """Fixed common RTK support + trimmed SVD costs; final fit still uses RANSAC."""
+    steps = int(np.ceil((args.offset_max-args.offset_min)/args.offset_step))
+    offsets = np.linspace(args.offset_min, args.offset_max, steps+1)
+    ids = spatial_samples(records[:, 1:4], eligible, args.sample_distance)
+    if len(ids) > 300:
+        ids = ids[np.unique(np.linspace(0, len(ids)-1, 300, dtype=int))]
+    rows = records[ids]
+    predictions = [match_antenna(poses, rows, shift, args.max_gap, args.lever_arm) for shift in offsets]
+    common = np.ones(len(ids), dtype=bool)
+    for points in predictions:
+        common &= np.isfinite(points).all(axis=1)
+    profile = []
+    for shift, prediction in zip(offsets, predictions):
+        score = None
+        if common.sum() >= args.min_pairs:
+            x, y, w = prediction[common], rows[common, 1:4], weights[ids][common]
+            count = max(args.min_pairs, int(np.ceil(len(x)*.7)))
+            keep = np.arange(len(x))
+            try:
+                for _ in range(8):
+                    r, t = fit_rigid(x[keep], y[keep], w[keep])
+                    errors = np.linalg.norm(x@r.T+t-y, axis=1)
+                    new = np.sort(np.argsort(errors)[:count])
+                    if np.array_equal(new, keep):
+                        break
+                    keep = new
+                r, t = fit_rigid(x[keep], y[keep], w[keep])
+                errors = np.linalg.norm(x[keep]@r.T+t-y[keep], axis=1)
+                score = float(np.sqrt(np.average(errors**2, weights=w[keep])))
+            except ValueError:
+                pass
+        profile.append({'offset_s':float(shift), 'common_points':int(common.sum()), 'trimmed_rmse_m':score})
+    with (args.output/'time_offset_search.csv').open('w') as stream:
+        writer = csv.DictWriter(stream, fieldnames=['offset_s','common_points','trimmed_rmse_m'])
+        writer.writeheader()
+        writer.writerows(profile)
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(8, 4), constrained_layout=True)
+    costs = [np.nan if row['trimmed_rmse_m'] is None else row['trimmed_rmse_m'] for row in profile]
+    ax.plot(offsets, costs, '.-')
+    ax.set(xlabel='Offset [s]: t_map = t_RTK + offset', ylabel='Trimmed weighted RMSE [m]',
+           title='Time offset search: same RTK pairs for every candidate')
+    ax.grid(True, alpha=.3)
+    fig.savefig(args.output/'time_offset_search.png', dpi=150)
+    plt.close(fig)
+    finite = np.flatnonzero(np.isfinite(costs))
+    if not len(finite):
+        raise ValueError('Time offset search needs enough non-collinear pairs with support at every offset; narrow range or select a better time window')
+    best = int(finite[np.argmin(np.asarray(costs)[finite])])
+    if np.ptp(np.asarray(costs)[finite]) < 1e-5:
+        raise ValueError('Time offset is unobservable: search costs are flat; use changing motion or a known manual offset')
+    if best in (0, len(offsets)-1):
+        raise ValueError('Best time offset is at search boundary; inspect profile and expand offset range')
+    return float(offsets[best]), profile
 
 
 def main(argv=None):
@@ -335,6 +428,15 @@ def main(argv=None):
     parser.add_argument('--max-rmse', type=float, default=.3, help='Maximum inlier 3D RMSE; failing produces no export')
     parser.add_argument('--ransac-trials', type=int, default=500)
     parser.add_argument('--alignment-only', action='store_true', help='Export alignment diagnostics without reading PCDs')
+    parser.add_argument('--fit-start', type=float, default=0., help='Fit window start, seconds from first valid RTK CSV record')
+    parser.add_argument('--fit-end', type=float, default=-1., help='Fit window end in relative seconds; -1 means no end limit')
+    parser.add_argument('--max-xy-variance', type=float, default=0., help='Fit eligibility: max East/North variance [m^2]; 0 disables offline upper gate')
+    parser.add_argument('--max-z-variance', type=float, default=0., help='Fit eligibility: max Up variance [m^2]; 0 disables offline upper gate')
+    parser.add_argument('--validation-scope', choices=('all', 'fit_window'), default='all', help='all retains global check; fit_window accepts only on eligible window, NOT global accuracy')
+    parser.add_argument('--auto-time-offset', action='store_true', help='Search a constant time offset on eligible fitting points')
+    parser.add_argument('--offset-min', type=float, default=-2.)
+    parser.add_argument('--offset-max', type=float, default=2.)
+    parser.add_argument('--offset-step', type=float, default=.1)
     args = parser.parse_args(argv)
     if (args.max_gap <= 0 or args.sample_distance < 0 or args.inlier_threshold <= 0 or
             args.min_pairs < 3 or not 0 < args.min_inlier_ratio <= 1 or args.max_rmse <= 0 or args.ransac_trials < 0):
@@ -342,6 +444,15 @@ def main(argv=None):
     if not np.isfinite(args.lever_arm + [args.time_offset, args.max_gap, args.sample_distance,
                                        args.inlier_threshold, args.max_rmse]).all():
         raise ValueError('Non-finite parameters')
+    if not np.isfinite([args.fit_start, args.fit_end, args.max_xy_variance, args.max_z_variance,
+                        args.offset_min, args.offset_max, args.offset_step]).all():
+        raise ValueError('Non-finite fitting/search parameters')
+    if (args.fit_start < 0 or (args.fit_end != -1 and args.fit_end <= args.fit_start)
+            or args.max_xy_variance < 0 or args.max_z_variance < 0
+            or args.offset_min >= args.offset_max or args.offset_step <= 0):
+        raise ValueError('Invalid fit window, covariance gate or time offset search range')
+    if (args.offset_max-args.offset_min)/args.offset_step > 1000:
+        raise ValueError('Too many offset candidates; use <=1001 grid points')
     if args.output.exists():
         raise ValueError('Output already exists; select a new directory')
     poses = read_poses(args.session/'alidarState.txt')
@@ -350,57 +461,78 @@ def main(argv=None):
     for key in ('latitude', 'longitude', 'altitude'):
         if not np.isfinite(float(datum[key])):
             raise ValueError('Invalid datum')
-    source, target, times, weights = [], [], [], []
-    raw_target, raw_rtk_times = [], []
-    excluded = 0
+    records = []
+    invalid_records = 0
     last_stamp = -np.inf
     with args.rtk.open() as stream:
         for row in csv.DictReader(stream):
-            stamp = float(row['timestamp'])
-            y = np.array([float(row[k]) for k in ('east','north','up')])
-            var = np.array([float(row[k]) for k in ('var_e','var_n','var_u')])
-            if (not np.isfinite(np.r_[stamp,y,var]).all() or np.any(var <= 0) or stamp <= last_stamp):
-                excluded += 1
+            record = np.array([float(row[k]) for k in ('timestamp','east','north','up','var_e','var_n','var_u')])
+            stamp = record[0]
+            if (not np.isfinite(record).all() or np.any(record[4:7] <= 0) or stamp <= last_stamp):
+                invalid_records += 1
                 continue
             last_stamp = stamp
-            raw_target.append(y)
-            raw_rtk_times.append(stamp)
-            pose = interpolate(poses, stamp+args.time_offset, args.max_gap)
-            if pose is None:
-                excluded += 1
-                continue
-            p, r = pose
-            source.append(p+r@np.asarray(args.lever_arm))
-            target.append(y)
-            times.append(stamp)
-            # Scalar inverse mean variance; no claim of full anisotropic covariance weighting.
-            weights.append(1./max(float(var.mean()), 1e-6))
-    source = np.asarray(source).reshape(-1, 3)
-    target = np.asarray(target).reshape(-1, 3)
-    weights = np.asarray(weights)
-    raw_target = np.asarray(raw_target).reshape(-1, 3)
+            records.append(record)
+    records = np.asarray(records).reshape(-1, 7)
+    raw_target = records[:, 1:4]
+    raw_rtk_times = records[:, 0]
     raw_source = np.array([pose[1:4]+quaternion_matrix(pose[4:8])@args.lever_arm for pose in poses])
-    selected, last = [], None
-    for i, point in enumerate(target):
-        if last is None or np.linalg.norm(point-last) >= args.sample_distance:
-            selected.append(i)
-            last = point
-    selected = np.asarray(selected, dtype=int)
+    reference = float(records[0, 0]) if len(records) else None
+    elapsed = records[:, 0]-reference if len(records) else np.array([])
+    window = (elapsed >= args.fit_start)
+    if args.fit_end >= 0:
+        window &= elapsed <= args.fit_end
+    quality = np.ones(len(records), dtype=bool)
+    if args.max_xy_variance > 0:
+        quality &= np.max(records[:, 4:6], axis=1) <= args.max_xy_variance
+    if args.max_z_variance > 0:
+        quality &= records[:, 6] <= args.max_z_variance
+    record_weights = 1./np.maximum(records[:, 4:7].mean(axis=1), 1e-6)
     args.output.mkdir(parents=True)
+    requested_offset = args.time_offset
+    offset_failure = None
+    if args.auto_time_offset:
+        try:
+            args.time_offset, _ = search_time_offset(poses, records, window & quality, record_weights, args)
+            print('Estimated time offset: %.6f s (t_map = t_RTK + offset)' % args.time_offset)
+        except ValueError as exc:
+            offset_failure = str(exc)
+    predictions = match_antenna(poses, records, args.time_offset, args.max_gap, args.lever_arm)
+    matched = np.isfinite(predictions).all(axis=1)
+    source, target = predictions[matched], raw_target[matched]
+    times = records[matched, 0]
+    variances = records[matched, 4:7]
+    weights = record_weights[matched]
+    fit_window, quality_pass = window[matched], quality[matched]
+    eligible = fit_window & quality_pass
+    excluded = invalid_records+int((~matched).sum())
+    selected = spatial_samples(target, eligible, args.sample_distance)
+    numeric_parameters = {k:v for k,v in vars(args).items() if isinstance(v,(float,int,bool))}
+    context = {'fit_reference_rtk_timestamp':reference, 'fit_window_seconds':[args.fit_start, args.fit_end],
+               'validation_scope':args.validation_scope, 'time_offset_s':args.time_offset,
+               'requested_time_offset_s':requested_offset, 'parameters':numeric_parameters,
+               'lever_arm_imu_m':args.lever_arm,
+               'inputs':{'session':str(args.session.resolve()), 'rtk':str(args.rtk.resolve())},
+               'time_offset_search':{'enabled':args.auto_time_offset,
+                                    'range_s':[args.offset_min, args.offset_max],
+                                    'max_step_s':args.offset_step,
+                                    'score':'fixed common RTK pairs; 70 percent trimmed weighted SVD RMSE'}}
 
     def diagnostics(candidate=None, method='none', failure=None):
         trajectory_diagnostics(args.output, source, target, times, selected, args.inlier_threshold,
                                raw_source, raw_target, poses[:, 0], raw_rtk_times,
-                               candidate, method, failure)
+                               candidate, method, failure, variances, fit_window, quality_pass, args.validation_scope)
 
     def failed_report(reason, metrics=None):
         (args.output/'alignment.json').write_text(json.dumps({
             'status':'alignment_failed', 'failure_reason':reason, 'T_enu_map':None,
-            'datum':datum, 'matched':len(source), 'excluded':excluded,
+            **context, 'datum':datum, 'matched':len(source), 'excluded':excluded,
             'metrics':metrics, 'diagnostic':'diagnostic.json', 'plot':'trajectory_comparison.png'
         }, indent=2, allow_nan=False)+'\n')
 
     try:
+        if offset_failure:
+            raise AlignmentFitError('Time offset search failed: '+offset_failure)
         if len(source) < args.min_pairs:
             raise AlignmentFitError('Too few time-matched RTK points')
         r, t, inliers = robust_fit(source[selected], target[selected], weights[selected],
@@ -410,8 +542,8 @@ def main(argv=None):
         method = 'rejected RANSAC candidate' if candidate is not None else 'none'
         if candidate is None:
             try:
-                candidate = fit_rigid(source, target, weights)
-                method = 'all-pair SVD, visualization only'
+                candidate = fit_rigid(source[eligible], target[eligible], weights[eligible])
+                method = 'eligible-pair SVD, visualization only'
             except ValueError:
                 pass
         failed_report(str(exc))
@@ -422,20 +554,30 @@ def main(argv=None):
     accepted = errors <= args.inlier_threshold
     rmse = float(np.sqrt(np.mean(errors[selected][inliers]**2)))
     all_rmse = float(np.sqrt(np.mean(errors**2)))
+    validation = np.ones(len(source), dtype=bool) if args.validation_scope == 'all' else eligible
+    validation_ratio = float(accepted[validation].mean()) if validation.any() else 0.
     stats = {'matched':len(source), 'excluded':excluded, 'fit_points':len(selected),
              'fit_inliers':int(inliers.sum()), 'fit_inlier_rmse_m':rmse,
              'all_rmse_m':all_rmse, 'all_median_m':float(np.median(errors)),
              'all_p95_m':float(np.percentile(errors,95)), 'all_max_m':float(errors.max()),
-             'all_inlier_ratio':float(accepted.mean())}
-    if rmse > args.max_rmse or accepted.mean() < args.min_inlier_ratio:
+             'all_inlier_ratio':float(accepted.mean()),
+             'fit_window_matched':int(fit_window.sum()), 'eligible_fit_pairs':int(eligible.sum()),
+             'covariance_rejected_matched':int((~quality_pass).sum()),
+             'validation_count':int(validation.sum()), 'validation_inlier_ratio':validation_ratio,
+             'validation_rmse_m':float(np.sqrt(np.mean(errors[validation]**2))) if validation.any() else None}
+    context['global_warning'] = ('Whole-trajectory errors exceed fitting tolerances; a rigid transform cannot repair map drift'
+                                 if accepted.mean() < args.min_inlier_ratio or all_rmse > args.max_rmse else None)
+    if rmse > args.max_rmse or validation_ratio < args.min_inlier_ratio:
         reason = 'Alignment failed quality gate: '+json.dumps(stats)
         failed_report(reason, stats)
         diagnostics((r, t), 'rejected final fit', 'Alignment failed quality gate')
         raise ValueError(reason)
-    diagnostics((r, t), 'validated fit')
+    diagnostics((r, t), 'validated '+args.validation_scope+' fit')
+    if context['global_warning']:
+        print('WARNING: '+context['global_warning'])
     transform = np.eye(4)
     transform[:3,:3], transform[:3,3] = r, t
-    report = {'status':'alignment_validated', 'datum':datum, 'T_enu_map':transform.tolist(),
+    report = {**context, 'status':'alignment_validated', 'datum':datum, 'T_enu_map':transform.tolist(),
               'convention':'p_enu = R_enu_map @ p_map + t_enu_map; scale=1',
               'lever_arm_imu_m':args.lever_arm, 'time_offset_s':args.time_offset,
               'interpolation':'linear position / quaternion SLERP; no extrapolation',
@@ -446,12 +588,6 @@ def main(argv=None):
         (args.output/'alignment.json').write_text(json.dumps(report, indent=2, allow_nan=False)+'\n')
     save_report()
     np.savetxt(args.output/'T_enu_map.txt', transform, fmt='%.12g')
-    with (args.output/'residuals.csv').open('w') as stream:
-        writer = csv.writer(stream)
-        writer.writerow(['timestamp','dx','dy','dz','norm','fit_sample','inlier'])
-        selected_set = set(selected.tolist())
-        for i, (stamp, residual, err) in enumerate(zip(times,residuals,errors)):
-            writer.writerow([format(stamp,'.9f'), *residual, err, int(i in selected_set), int(accepted[i])])
     # Export TUM poses for every final frame, retaining original frame order.
     # Quaternion multiplication q_enu_map * q_map_imu.
     # Stable rotation -> quaternion via symmetric eigensystem (xyzw).
@@ -493,8 +629,16 @@ def run_ros():
     argv.extend(['--lever-arm', *map(str, lever)])
     for name, default in (('time_offset', 0.), ('max_gap', .25), ('sample_distance', 1.),
                           ('inlier_threshold', .5), ('min_pairs', 10),
-                          ('min_inlier_ratio', .7), ('max_rmse', .3), ('ransac_trials', 500)):
+                          ('min_inlier_ratio', .7), ('max_rmse', .3), ('ransac_trials', 500),
+                          ('fit_start', 0.), ('fit_end', -1.), ('max_xy_variance', 0.),
+                          ('max_z_variance', 0.), ('offset_min', -2.), ('offset_max', 2.), ('offset_step', .1)):
         argv.extend(['--'+name.replace('_', '-'), str(rospy.get_param('~'+name, default))])
+    argv.extend(['--validation-scope', rospy.get_param('~validation_scope', 'all')])
+    automatic = rospy.get_param('~auto_time_offset', False)
+    if not isinstance(automatic, bool):
+        raise ValueError('~auto_time_offset must be a ROS boolean')
+    if automatic:
+        argv.append('--auto-time-offset')
     datum = rospy.get_param('~datum', '')
     if datum:
         argv.extend(['--datum', datum])
