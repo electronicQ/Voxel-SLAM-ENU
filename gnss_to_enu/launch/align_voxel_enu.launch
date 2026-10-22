@@ -84,7 +84,10 @@
        使用固定随机种子便于复现；选出内点后的重拟合另有最多 10 次迭代，不由此参数控制。 -->
   <arg name="ransac_trials" default="500" />
 
-  <!-- 将上述配置传入节点的 ROS 私有参数；只需修改上方 arg，无需重复修改下方映射。 -->
+  <!-- 无论配准通过或失败，均在 output 生成 trajectory_comparison.png 供诊断。
+       蓝色为 SLAM 天线轨迹，橙色为 RTK；失败候选仅供查看，不用于导出地图。
+       需要 python3-matplotlib；无图形桌面也可生成 PNG。
+       将上述配置传入节点的 ROS 私有参数；只需修改上方 arg，无需重复修改下方映射。 -->
   <node pkg="gnss_to_enu" type="align_voxel_enu.py" name="align_voxel_enu"
         args="--ros-params" output="screen">
     <param name="session" value="$(arg session)" type="str" />

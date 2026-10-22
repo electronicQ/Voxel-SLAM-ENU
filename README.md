@@ -41,7 +41,7 @@ src/
 ## 环境与构建
 
 目标部署环境为 Ubuntu 20.04、ROS1 Noetic、Python 3.8+。
-Voxel-SLAM 还需要 Eigen、PCL、GTSAM、Livox SDK 等依赖，具体参考 [Voxel-SLAM 原说明](Voxel-SLAM/README.md)和 [Livox 驱动说明](sensors/livox_ros_driver/README_CN.md)。离线工具依赖 NumPy。
+Voxel-SLAM 还需要 Eigen、PCL、GTSAM、Livox SDK 等依赖，具体参考 [Voxel-SLAM 原说明](Voxel-SLAM/README.md)和 [Livox 驱动说明](sensors/livox_ros_driver/README_CN.md)。离线工具依赖 NumPy 和 Matplotlib（用于轨迹诊断图）。
 
 把仓库克隆为一个新工作空间的 `src` 目录：
 
@@ -49,7 +49,7 @@ Voxel-SLAM 还需要 Eigen、PCL、GTSAM、Livox SDK 等依赖，具体参考 [V
 mkdir -p ~/voxel_enu_ws
 cd ~/voxel_enu_ws
 git clone git@github.com:electronicQ/Voxel-SLAM-ENU.git src
-sudo apt install python3-numpy
+sudo apt install python3-numpy python3-matplotlib
 # 完成原工程其他依赖安装后：
 source /opt/ros/noetic/setup.bash
 catkin_make
@@ -155,9 +155,27 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 | `trajectory_enu.tum` | ENU 下的最终 IMU 位姿轨迹 |
 | `T_enu_map.txt` | 4×4 变换，`p_enu = R_enu_map * p_map + t_enu_map` |
 | `alignment.json` | 原点、杆臂、参数、误差统计及导出状态 |
-| `residuals.csv` | 全部匹配点的三轴及三维残差 |
+| `residuals.csv` | 全部匹配点的三轴及三维残差（存在候选变换时） |
+| `trajectory_comparison.png` | 无论配准通过或失败均输出的轨迹对比图 |
+| `diagnostic.json` | 图片所用变换的来源、是否通过验收及失败原因 |
+| `matched_pairs.csv` | 时间匹配后的地图系/ENU 天线点对 |
 
 完整导出成功时 `alignment.json.status` 为 `complete`。
+
+运行对齐后，直接查看输出目录中的 `trajectory_comparison.png`：
+
+- 蓝色空心圆：SLAM 天线位置；橙色叉号：RTK 天线位置。
+- 左上：两条轨迹分别平移到各自起点为零后的水平形状，未校正坐标系方向差异。
+- 右上：候选或已通过验收的变换下，ENU 水平轨迹叠加；灰线连接同时间点对。
+- 左下：两条轨迹的高度随时间变化。
+- 右下：所有匹配点的三轴偏差、三维距离及内点门限。
+
+保留全部匹配点（含外点），只对灰色连线均匀稀疏显示，最多 120 条，避免遮挡。
+求解失败时仍保存图片；完全没有可用变换时显示原始轨迹形状/相对高度，无法计算的对齐图和残差会注明原因。
+若时间没有重叠，原始形状图改用完整可用输入轨迹，并不伪造对应点。
+失败候选会明确标注“diagnostic only”，只存于 `diagnostic.json`，不写有效 `T_enu_map.txt` 或 ENU 地图。
+质量检查失败仍返回非零退出码，且 `alignment.json.status=alignment_failed`；这是保留诊断的正常失败流程。
+输出目录必须是新的；文件缺失或损坏导致输入轨迹无法读取时，无法保证生成轨迹图。
 部署前检查全程及各航段残差、起终点地图一致性；配准结果不能替代对原地图质量的验收。
 
 ## 验证状态
@@ -167,8 +185,8 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 python3 -m unittest discover -s gnss_to_enu/tests -v
 ```
 
-已通过 7 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建，自动/手动原点记录及 ROS 参数入口映射。
-已检查 Python 语法和 launch XML，并已在 ROS1 环境测试通过。
+已通过 8 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建，自动/手动原点记录及 ROS 参数入口映射。
+已检查 Python 语法和 launch XML，并已在 ROS1 环境测试通过。新增诊断绘图已通过合成数据测试，更新后的 ROS1 回放待验证。
 
 ## 上游与许可证
 

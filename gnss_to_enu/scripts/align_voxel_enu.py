@@ -79,11 +79,19 @@ def fit_rigid(source, target, weights=None):
     return rotation, my-rotation@mx
 
 
+class AlignmentFitError(ValueError):
+    """Rejected fit; retain its candidate exclusively for failure diagnostics."""
+    def __init__(self, message, candidate=None):
+        super().__init__(message)
+        self.candidate = candidate
+
+
 def robust_fit(source, target, weights, threshold, trials, min_pairs, min_ratio):
     if len(source) < min_pairs:
-        raise ValueError('Too few spatially sampled correspondences')
+        raise AlignmentFitError('Too few spatially sampled correspondences')
     rng = np.random.RandomState(0)
     best, best_score = None, (-1, -np.inf)
+    best_rt = None
     # Include all-point SVD, then deterministic RANSAC for RTK outliers.
     for trial in range(trials+1):
         ids = np.arange(len(source)) if trial == 0 else rng.choice(len(source), 3, replace=False)
@@ -96,17 +104,22 @@ def robust_fit(source, target, weights, threshold, trials, min_pairs, min_ratio)
         score = (int(mask.sum()), -float(np.minimum(errors, threshold).sum()))
         if score > best_score:
             best, best_score = mask, score
+            best_rt = (r, t)
     if best is None:
-        raise ValueError('Cannot find a non-degenerate alignment')
+        raise AlignmentFitError('Cannot find a non-degenerate alignment')
+    r, t = best_rt
     for _ in range(10):
         if best.sum() < min_pairs or best.mean() < min_ratio:
-            raise ValueError('Insufficient alignment inliers; check sync, lever arm and map drift')
-        r, t = fit_rigid(source[best], target[best], weights[best])
+            raise AlignmentFitError('Insufficient alignment inliers; check sync, lever arm and map drift', (r, t))
+        try:
+            r, t = fit_rigid(source[best], target[best], weights[best])
+        except ValueError as exc:
+            raise AlignmentFitError(str(exc), (r, t)) from exc
         mask = np.linalg.norm(source@r.T+t-target, axis=1) <= threshold
         if np.array_equal(mask, best):
             return r, t, best
         best = mask
-    raise ValueError('Inlier classification did not converge')
+    raise AlignmentFitError('Inlier classification did not converge', (r, t))
 
 
 def pcd_header(stream):
@@ -187,6 +200,125 @@ def export_map(scan_dir, poses, rotation, translation, output):
     return total
 
 
+def trajectory_diagnostics(output, source, target, times, selected, threshold,
+                           raw_source, raw_target, raw_map_times, raw_rtk_times,
+                           candidate=None, method='none', failure=None):
+    """Plot every usable matched pair, including outliers; never validate a transform."""
+    import matplotlib
+    matplotlib.use('Agg')  # Works on a headless ROS computer, no display or plt.show().
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+
+    blue, orange = '#0072B2', '#D55E00'
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11), constrained_layout=True)
+    title = 'ALIGNMENT FAILED - diagnostic only' if failure else 'Alignment passed quality checks'
+    fig.suptitle(title+'\n'+(failure or 'All time-matched antenna positions; no outliers hidden'), fontsize=13)
+
+    def tracks(ax, x, y, centered=False):
+        for points, color, label in ((x, blue, 'SLAM antenna'), (y, orange, 'RTK antenna')):
+            if not len(points):
+                continue
+            points = points-points[0] if centered else points
+            ax.plot(points[:, 0], points[:, 1], color=color, linewidth=.65, alpha=.65)
+            if label == 'SLAM antenna':
+                ax.scatter(points[:, 0], points[:, 1], edgecolors=color, facecolors='none',
+                           s=16, linewidths=.7, label=label)
+            else:
+                ax.scatter(points[:, 0], points[:, 1], color=color, marker='x',
+                           s=12, linewidths=.65, label=label)
+            ax.scatter(*points[0, :2], marker='o', s=65, facecolors='none', edgecolors=color)
+            ax.scatter(*points[-1, :2], marker='*', s=105, color=color)
+        ax.set_aspect('equal', adjustable='datalim')
+        ax.grid(True, alpha=.25)
+        if len(x) or len(y):
+            ax.legend(loc='best', fontsize=9)
+
+    # When there is no temporal overlap, still show the complete input trajectories.
+    x = source if len(source) else raw_source
+    y = target if len(target) else raw_target
+    tracks(axes[0, 0], x, y, centered=True)
+    axes[0, 0].set(title='Before alignment: starts translated to zero (rotation unchanged)',
+                   xlabel='Map X / ENU East relative to own start [m]',
+                   ylabel='Map Y / ENU North relative to own start [m]')
+    axes[0, 0].text(.02, .02, 'Circle = start; star = end. Different coordinate axes before alignment.',
+                     transform=axes[0, 0].transAxes, fontsize=8,
+                     bbox={'facecolor':'white', 'edgecolor':'none', 'alpha':.85})
+
+    residuals, errors = None, None
+    if candidate is not None and len(source):
+        r, t = candidate
+        transformed = source@r.T+t
+        residuals = transformed-target
+        errors = np.linalg.norm(residuals, axis=1)
+        tracks(axes[0, 1], transformed, target)
+        # Keep ALL scatter points. Thin only connectors to prevent an unreadable web.
+        ids = np.unique(np.linspace(0, len(source)-1, min(120, len(source)), dtype=int))
+        segments = np.stack([transformed[ids, :2], target[ids, :2]], axis=1)
+        axes[0, 1].add_collection(LineCollection(segments, colors='#777777', linewidths=.6, alpha=.55))
+        axes[0, 1].set(title='After transform: '+method+' (gray = timestamp pairs)',
+                       xlabel='East [m]', ylabel='North [m]')
+        elapsed = np.asarray(times)-times[0]
+        axes[1, 0].plot(elapsed, transformed[:, 2], '.-', color=blue, markersize=3, linewidth=.7, label='SLAM antenna')
+        axes[1, 0].plot(elapsed, target[:, 2], '.-', color=orange, markersize=3, linewidth=.7, label='RTK antenna')
+        axes[1, 0].set(title='Height after transform', xlabel='Time since first matched RTK [s]', ylabel='Up [m]')
+        for j, name in enumerate(('dEast', 'dNorth', 'dUp')):
+            axes[1, 1].plot(elapsed, residuals[:, j], linewidth=.8, label=name)
+        axes[1, 1].plot(elapsed, errors, color='black', linewidth=1, label='3D distance')
+        axes[1, 1].axhline(threshold, color='red', linestyle='--', linewidth=1, label='Inlier threshold')
+        axes[1, 1].set(title='Residual = transformed SLAM - RTK (all matched pairs)',
+                       xlabel='Time since first matched RTK [s]', ylabel='Residual [m]')
+        axes[0, 1].text(.02, .02, 'Matched: %d; fit samples: %d; 3D RMSE (all): %.3f m' %
+                        (len(source), len(selected), np.sqrt(np.mean(errors**2))),
+                        transform=axes[0, 1].transAxes, fontsize=8,
+                        bbox={'facecolor':'white', 'edgecolor':'none', 'alpha':.85})
+    else:
+        axes[0, 1].text(.5, .5, 'No usable rigid transform\nNo ENU-aligned trajectory available',
+                         ha='center', va='center', transform=axes[0, 1].transAxes)
+        axes[0, 1].set_title('Alignment unavailable')
+        for points, stamps, color, label in ((raw_source, raw_map_times, blue, 'SLAM antenna'),
+                                             (raw_target, raw_rtk_times, orange, 'RTK antenna')):
+            if len(points):
+                axes[1, 0].plot(np.asarray(stamps)-raw_map_times[0], points[:, 2]-points[0, 2],
+                                '.-', color=color, markersize=3, linewidth=.7, label=label)
+        axes[1, 0].set(title='Input heights relative to own start (different coordinate axes)',
+                       xlabel='Input timestamp minus first SLAM timestamp [s]', ylabel='Relative height [m]')
+        axes[1, 1].text(.5, .5, 'No residuals without a usable transform\nMatched pairs: %d' % len(source),
+                         ha='center', va='center', transform=axes[1, 1].transAxes)
+        axes[1, 1].set_title('Residual unavailable')
+    for ax in axes[1]:
+        ax.grid(True, alpha=.25)
+        if ax.lines:
+            ax.legend(loc='best', fontsize=8)
+    try:
+        fig.savefig(output/'trajectory_comparison.png', dpi=160)
+    finally:
+        plt.close(fig)
+
+    diagnostic = {'status':'failed' if failure else 'passed', 'failure_reason':failure,
+                  'comparison':'time-matched antenna positions; all matched points included',
+                  'candidate_method':method, 'candidate_validated':not bool(failure) and candidate is not None,
+                  'matched':len(source), 'fit_points':len(selected), 'connector_limit':120,
+                  'candidate_T_enu_map':None}
+    if candidate is not None:
+        transform = np.eye(4)
+        transform[:3, :3], transform[:3, 3] = candidate
+        diagnostic['candidate_T_enu_map'] = transform.tolist()
+    (output/'diagnostic.json').write_text(json.dumps(diagnostic, indent=2, allow_nan=False)+'\n')
+    selected_set = set(selected.tolist())
+    with (output/'matched_pairs.csv').open('w') as stream:
+        writer = csv.writer(stream)
+        writer.writerow(['timestamp','map_x','map_y','map_z','rtk_e','rtk_n','rtk_u','fit_sample'])
+        for i, (stamp, p, q) in enumerate(zip(times, source, target)):
+            writer.writerow([format(stamp,'.9f'), *p, *q, int(i in selected_set)])
+    if errors is not None:
+        with (output/'residuals.csv').open('w') as stream:
+            writer = csv.writer(stream)
+            writer.writerow(['timestamp','dx','dy','dz','norm','fit_sample','inlier'])
+            for i, (stamp, residual, err) in enumerate(zip(times, residuals, errors)):
+                writer.writerow([format(stamp,'.9f'), *residual, err, int(i in selected_set), int(err <= threshold)])
+    print('Trajectory diagnostic image: '+str((output/'trajectory_comparison.png').resolve()))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--session', required=True, type=Path, help='Voxel-SLAM session directory with alidarState.txt and i.pcd')
@@ -219,6 +351,7 @@ def main(argv=None):
         if not np.isfinite(float(datum[key])):
             raise ValueError('Invalid datum')
     source, target, times, weights = [], [], [], []
+    raw_target, raw_rtk_times = [], []
     excluded = 0
     last_stamp = -np.inf
     with args.rtk.open() as stream:
@@ -230,6 +363,8 @@ def main(argv=None):
                 excluded += 1
                 continue
             last_stamp = stamp
+            raw_target.append(y)
+            raw_rtk_times.append(stamp)
             pose = interpolate(poses, stamp+args.time_offset, args.max_gap)
             if pose is None:
                 excluded += 1
@@ -240,17 +375,48 @@ def main(argv=None):
             times.append(stamp)
             # Scalar inverse mean variance; no claim of full anisotropic covariance weighting.
             weights.append(1./max(float(var.mean()), 1e-6))
-    source, target, weights = np.asarray(source), np.asarray(target), np.asarray(weights)
-    if len(source) < args.min_pairs:
-        raise ValueError('Too few time-matched RTK points')
+    source = np.asarray(source).reshape(-1, 3)
+    target = np.asarray(target).reshape(-1, 3)
+    weights = np.asarray(weights)
+    raw_target = np.asarray(raw_target).reshape(-1, 3)
+    raw_source = np.array([pose[1:4]+quaternion_matrix(pose[4:8])@args.lever_arm for pose in poses])
     selected, last = [], None
     for i, point in enumerate(target):
         if last is None or np.linalg.norm(point-last) >= args.sample_distance:
             selected.append(i)
             last = point
     selected = np.asarray(selected, dtype=int)
-    r, t, inliers = robust_fit(source[selected], target[selected], weights[selected],
-                              args.inlier_threshold, args.ransac_trials, args.min_pairs, args.min_inlier_ratio)
+    args.output.mkdir(parents=True)
+
+    def diagnostics(candidate=None, method='none', failure=None):
+        trajectory_diagnostics(args.output, source, target, times, selected, args.inlier_threshold,
+                               raw_source, raw_target, poses[:, 0], raw_rtk_times,
+                               candidate, method, failure)
+
+    def failed_report(reason, metrics=None):
+        (args.output/'alignment.json').write_text(json.dumps({
+            'status':'alignment_failed', 'failure_reason':reason, 'T_enu_map':None,
+            'datum':datum, 'matched':len(source), 'excluded':excluded,
+            'metrics':metrics, 'diagnostic':'diagnostic.json', 'plot':'trajectory_comparison.png'
+        }, indent=2, allow_nan=False)+'\n')
+
+    try:
+        if len(source) < args.min_pairs:
+            raise AlignmentFitError('Too few time-matched RTK points')
+        r, t, inliers = robust_fit(source[selected], target[selected], weights[selected],
+                                  args.inlier_threshold, args.ransac_trials, args.min_pairs, args.min_inlier_ratio)
+    except ValueError as exc:
+        candidate = getattr(exc, 'candidate', None)
+        method = 'rejected RANSAC candidate' if candidate is not None else 'none'
+        if candidate is None:
+            try:
+                candidate = fit_rigid(source, target, weights)
+                method = 'all-pair SVD, visualization only'
+            except ValueError:
+                pass
+        failed_report(str(exc))
+        diagnostics(candidate, method, str(exc))
+        raise
     residuals = source@r.T+t-target
     errors = np.linalg.norm(residuals, axis=1)
     accepted = errors <= args.inlier_threshold
@@ -262,8 +428,11 @@ def main(argv=None):
              'all_p95_m':float(np.percentile(errors,95)), 'all_max_m':float(errors.max()),
              'all_inlier_ratio':float(accepted.mean())}
     if rmse > args.max_rmse or accepted.mean() < args.min_inlier_ratio:
-        raise ValueError('Alignment failed quality gate: '+json.dumps(stats))
-    args.output.mkdir(parents=True)
+        reason = 'Alignment failed quality gate: '+json.dumps(stats)
+        failed_report(reason, stats)
+        diagnostics((r, t), 'rejected final fit', 'Alignment failed quality gate')
+        raise ValueError(reason)
+    diagnostics((r, t), 'validated fit')
     transform = np.eye(4)
     transform[:3,:3], transform[:3,3] = r, t
     report = {'status':'alignment_validated', 'datum':datum, 'T_enu_map':transform.tolist(),
@@ -345,6 +514,6 @@ if __name__ == '__main__':
             run_ros()
         else:
             main()
-    except (ValueError, OSError, KeyError) as exc:
+    except (ValueError, OSError, KeyError, ImportError) as exc:
         print('ENU alignment failed: '+str(exc), file=sys.stderr)
         sys.exit(1)

@@ -1,5 +1,7 @@
 """Run with python3 -m unittest discover -s src/gnss_to_enu/tests -v."""
 import csv
+import contextlib
+import io
 import importlib.util
 import json
 from pathlib import Path
@@ -96,6 +98,8 @@ class AlignmentTests(unittest.TestCase):
             trajectory=np.loadtxt(out/'trajectory_enu.tum')
             np.testing.assert_allclose(a.quaternion_matrix(trajectory[10,4:]),r@a.quaternion_matrix(poses[10,4:]),atol=1e-8)
             self.assertEqual(json.loads((out/'alignment.json').read_text())['status'],'complete')
+            self.assertTrue((out/'trajectory_comparison.png').stat().st_size > 10000)
+            self.assertTrue(json.loads((out/'diagnostic.json').read_text())['candidate_validated'])
             with self.assertRaises(ValueError):
                 a.main(args)
             (session/'3.pcd').unlink()
@@ -104,6 +108,60 @@ class AlignmentTests(unittest.TestCase):
                 a.main(args)
             self.assertFalse((root/'missing'/'map_enu.pcd').exists())
             self.assertEqual(json.loads((root/'missing'/'alignment.json').read_text())['status'],'map_export_failed')
+
+    def test_failure_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            session=root/'session'; session.mkdir()
+            n=40
+            stamps=1700000000.+np.arange(n)*.1
+            angle=np.linspace(0,2*np.pi,n)
+            xyz=np.column_stack([10*np.cos(angle),8*np.sin(angle),angle*.1])
+            (root/'datum.json').write_text(json.dumps({'latitude':22.,'longitude':113.,'altitude':10.}))
+            cases=('quality_gate','insufficient_inliers','too_few_samples','degenerate','no_time_overlap','no_valid_rtk')
+            for case in cases:
+                with self.subTest(case=case):
+                    points=xyz.copy()
+                    if case=='degenerate':
+                        points=np.column_stack([np.arange(n),np.zeros((n,2))])
+                    poses=np.column_stack([stamps,points,np.zeros((n,3)),np.ones(n)])
+                    np.savetxt(session/'alidarState.txt',poses,fmt='%.12f')
+                    target=points+np.array([5.,-2.,1.])
+                    if case in ('quality_gate','insufficient_inliers'):
+                        target=target+np.random.RandomState(8).normal(size=(n,3))*.1
+                    csvpath=root/(case+'.csv')
+                    with csvpath.open('w') as f:
+                        w=csv.writer(f)
+                        w.writerow(['timestamp','east','north','up','var_e','var_n','var_u'])
+                        for time,position in zip(stamps,target):
+                            w.writerow([format(time+(1000 if case=='no_time_overlap' else 0),'.9f'),
+                                        *position,0 if case=='no_valid_rtk' else .001,.001,.001])
+                    output=root/('out_'+case)
+                    args=['--session',str(session),'--rtk',str(csvpath),'--output',str(output),
+                          '--lever-arm','0','0','0','--sample-distance','0','--alignment-only']
+                    if case=='quality_gate':
+                        args+=['--max-rmse','0.00001']
+                    if case=='insufficient_inliers':
+                        args+=['--inlier-threshold','0.001','--min-inlier-ratio','0.99']
+                    if case=='too_few_samples':
+                        args+=['--sample-distance','1000']
+                    with self.assertRaises(ValueError), contextlib.redirect_stdout(io.StringIO()):
+                        a.main(args)
+                    self.assertTrue((output/'trajectory_comparison.png').stat().st_size > 10000)
+                    report=json.loads((output/'alignment.json').read_text())
+                    self.assertEqual(report['status'],'alignment_failed')
+                    self.assertIsNone(report['T_enu_map'])
+                    diag=json.loads((output/'diagnostic.json').read_text())
+                    self.assertFalse(diag['candidate_validated'])
+                    self.assertFalse((output/'T_enu_map.txt').exists())
+                    self.assertFalse((output/'map_enu.pcd').exists())
+                    self.assertTrue((output/'matched_pairs.csv').exists())
+                    if case in ('degenerate','no_time_overlap','no_valid_rtk'):
+                        self.assertIsNone(diag['candidate_T_enu_map'])
+                        self.assertFalse((output/'residuals.csv').exists())
+                    else:
+                        self.assertIsNotNone(diag['candidate_T_enu_map'])
+                        self.assertTrue((output/'residuals.csv').exists())
 
     def test_binary_padding_ascii_and_truncation(self):
         with tempfile.TemporaryDirectory() as tmp:

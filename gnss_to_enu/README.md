@@ -6,11 +6,11 @@
 
 ## 1. 安装与准备
 
-目标为 ROS1 Noetic / Python 3.8+。离线工具只依赖 Python3 和 NumPy，无需 ROS。
+目标为 ROS1 Noetic / Python 3.8+。离线工具依赖 Python3、NumPy 和 Matplotlib，无需 ROS 或图形桌面。
 在部署机器工作空间安装依赖并编译（原 Voxel-SLAM 的依赖仍按原工程安装）：
 
 ```bash
-sudo apt install python3-numpy
+sudo apt install python3-numpy python3-matplotlib
 catkin_make
 source devel/setup.bash
 ```
@@ -191,11 +191,35 @@ rosrun gnss_to_enu align_voxel_enu.py \
 - `alignment.json`：原点、T_enu_map、杆臂、时间偏移、门限、误差统计和导出状态。
 - `T_enu_map.txt`：4×4 地图→ENU 刚体变换；可用于后续定位结果转换。
 - `trajectory_enu.tum`：所有最终帧的 ENU 下 IMU 位姿（时间戳不变）。
-- `residuals.csv`：全部时间匹配点的 XYZ/三维残差、是否拟合样本、是否在门限内。
+- `residuals.csv`：全部时间匹配点的 XYZ/三维残差、是否拟合样本、是否在门限内；存在候选变换时生成。
+- `trajectory_comparison.png`：轨迹对比图，在正常输入可读取的情况下，配准成功或失败都会生成。
+- `diagnostic.json`：绘图所用候选变换、来源、验收状态及失败原因。
+- `matched_pairs.csv`：原始地图系天线点和对应 RTK ENU 点，供进一步排查。
 - `map_enu.pcd`：ENU 地图，binary XYZ float32；原保存格式没有可靠强度，本工具不输出 intensity。
 
 完整成功的 `alignment.json.status` 为 `complete`；只对齐为 `alignment_validated`；
 PCD 导出失败为 `map_export_failed`，不会留下半张 map_enu.pcd。
+拟合或质量验收失败为 `alignment_failed`，有效 `T_enu_map` 为 null，保留诊断文件但不导出地图。
+
+### 轨迹诊断图
+
+同一个 `roslaunch gnss_to_enu align_voxel_enu.launch` 命令自动生成 PNG，无需新增开关。
+使用 Matplotlib 的 Agg 后端，不弹窗口，也不依赖桌面环境。新依赖：`sudo apt install python3-matplotlib`。
+图中轨迹使用蓝色空心圆（SLAM 天线）和橙色叉号（RTK 天线）：
+
+1. 左上：匹配点轨迹分别平移到自身起点为零，只对比形状；没有消除坐标轴方向差异。
+2. 右上：变换后的 ENU 水平轨迹，用灰线连接同时间戳点对。
+3. 左下：变换后的高度随时间变化。
+4. 右下：三轴残差和三维距离随时间变化，红色虚线为内点门限。
+
+所有匹配点都画出，包括外点；灰色对应连线最多显示 120 条，避免轨迹被遮住。
+RANSAC 内点不足时优先画被拒绝的候选；没有候选但全部匹配点可以做 SVD 时，
+仅为诊断生成全点 SVD 变换；图片和 `diagnostic.json` 会明确标注未经验收。
+完全没有变换时仍输出原始轨迹及相对高度图，对齐及残差子图注明 unavailable。
+时间无重叠时会显示完整有效输入轨迹，不生成虚假的时间对应关系。
+输入文件无法读取、格式损坏或输出目录不可写时，无法保证绘图；输出目录已存在仍拒绝覆盖。
+
+质量失败继续以退出码 1 结束；图片的存在不代表配准通过，也不会跳过地图导出前的质量门限。
 输出目录必须不存在，避免覆盖上一轮结果。支持 Voxel-SLAM 默认 binary PCD，也支持 ASCII；不支持 binary_compressed。
 
 至少检查全程/分航段残差，以及起终点附近地图的一致性。低配准残差不能证明每个地图点都准确；
@@ -207,5 +231,6 @@ PCD 导出失败为 `map_export_failed`，不会留下半张 map_enu.pcd。
 python3 -m unittest discover -s src/gnss_to_enu/tests -v
 ```
 
-覆盖非零杆臂、时间插值、已知 SE(3) 恢复、异常点、直线退化、PCD 读取/重建和文件覆盖保护。
+覆盖非零杆臂、时间插值、已知 SE(3) 恢复、异常点、直线退化、PCD 读取/重建和文件覆盖保护；
+新增测试覆盖 RMSE 超限、内点不足、抽样不足、退化、无时间重叠及无有效 RTK 时的诊断图和无效变换保护。
 ROS1 构建与真实板卡/rosbag 回放需在部署环境验证。
