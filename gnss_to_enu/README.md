@@ -164,21 +164,21 @@ rosrun gnss_to_enu align_voxel_enu.py \
 1. 用结束时保存的轨迹（可选最终全局 BA）做位置线性插值和姿态 SLERP；不外推，也不使用另行记录的在线旧位姿。
 2. `a_map = p_map_imu + R_map_imu * lever_arm`，与同时间 ENU 天线点配对。
 3. 默认相邻拟合样本相距至少 1 m（3D 距离）；完整匹配数据保留用于验收。
-4. 固定尺度为 1，用确定性 RANSAC + 加权 SVD 求 `p_enu = R * p_map + t`。
+4. 自动选择多段候选窗口并比较时间偏差、运动覆盖和相邻独立窗口的变换一致性，再用 RANSAC + 加权 SVD 求固定尺度的 `p_enu = R * p_map + t`。
    权重为 ENU 三轴方差均值的倒数，是标量权重，并非完整各向异性协方差优化。
-5. 检查拟合内点 RMSE 和指定验收范围的内点比例；默认范围为全部匹配点。验证通过才导出。
+5. 检查拟合内点 RMSE、数量、比例及全程误差。质量超限发出警告，但只要存在有效变换仍导出。
 6. 各帧 IMU 系 PCD 先应用最终 IMU→地图位姿，再应用地图→ENU 变换，逐帧写盘，避免整张地图同时驻留内存。
 
-常用参数：
+下表为 Python CLI 默认参数；ROS launch 默认自动时间搜索开启，部分质量门限以 launch 中的值为准：
 
 | 参数 | 默认值 | 含义 |
 |---|---:|---|
-| `--time-offset` | 0 s | `t_map = t_RTK + offset`，明确为加号，不自动估计 |
+| `--time-offset` | 0 s | 人工偏移，`t_map = t_RTK + offset`；开启自动时间搜索时可被估计值替代 |
 | `--max-gap` | 0.25 s | 插值两端最大间隔；精确匹配不需要插值 |
 | `--sample-distance` | 1 m | 拟合点间三维位移；0 表示全部匹配点 |
 | `--inlier-threshold` | 0.5 m | 三维残差内点门限 |
 | `--min-pairs` | 10 | 最少拟合内点数量 |
-| `--min-inlier-ratio` | 0.7 | 拟合点及 validation_scope 指定范围的最少内点比例 |
+| `--min-inlier-ratio` | 0.7 | 拟合点及全部匹配点最少内点比例 |
 | `--max-rmse` | 0.3 m | 拟合内点三维 RMSE 上限 |
 | `--ransac-trials` | 500 | RANSAC 尝试次数，固定随机种子 |
 
@@ -186,54 +186,62 @@ rosrun gnss_to_enu align_voxel_enu.py \
 不要只放宽门限。直线或近共线轨迹会拒绝；有转弯的平面航迹可以配准，无需一定有明显高度变化。
 所有参数见 `--help`。
 
-### 中段可信、前后段有疑问时的拟合方式
+### 自动选段，无需手工指定飞行时间窗
 
-新增参数默认关闭额外处理，旧的全程拟合和验收方式不变：
-
-| ROS 参数 | 默认值 | 作用 |
-|---|---|---|
-| `fit_start` / `fit_end` | 0 / -1 s | 仅使用该时间窗拟合；-1 表示到末尾 |
-| `max_xy_variance` | 0 m² | East/North 任一方差超限则不参与拟合；0 不额外限制 |
-| `max_z_variance` | 0 m² | Up 方差超限则不参与拟合；0 不额外限制 |
-| `auto_time_offset` | false | true 时用原始 SLAM 轨迹搜索固定时间偏移 |
-| `offset_min` / `offset_max` | -2 / 2 s | 搜索的绝对偏移范围，符号仍为 `t_map=t_RTK+offset` |
-| `offset_step` | 0.1 s | 最大网格步长，越小越细但越慢 |
-| `validation_scope` | all | all 检查全程；fit_window 只验收窗内且协方差合格的点 |
-
-**时间窗从 CSV 第一条数据有效、时间戳合法且方差为正的 RTK 记录开始计时，位于离线协方差上限过滤和时间匹配之前。**
-因此调整方差门限、手动时间偏移不会悄悄改变窗口起点；绝对参考时间保存在 `fit_reference_rtk_timestamp`。
-窗外和协方差超限的匹配点仍出现在图片、CSV 和 `all_*` 误差中，但不会影响 RT 或自动时间搜索。
-这不等于恢复原始 GNSS 数据，记录阶段已过滤的观测无法从 CSV 补回。
-
-针对本次约 15 分钟、疑似约 +1 s 时间差的 flight01，可先用 100～450 s 中段做诊断：
+默认运行原命令即可：
 
 ```bash
-roslaunch gnss_to_enu align_voxel_enu.launch \
-  fit_start:=100 fit_end:=450 \
-  max_xy_variance:=0.01 max_z_variance:=0.04 \
-  auto_time_offset:=true offset_min:=0.0 offset_max:=2.0 offset_step:=0.1 \
-  validation_scope:=fit_window alignment_only:=true \
-  output:="$HOME/voxel_enu_data/check_mid_sync01"
+roslaunch gnss_to_enu align_voxel_enu.launch
 ```
 
-这些窗口和方差值是本次数据的排查起点，不适合未经检查直接用于所有飞行。
-如果候选点不足，先查看协方差和时间覆盖，不要直接扩大误差门限。
+流程自动比较不同起点、半长/基准/两倍长度的重叠窗口，不需要手工设置 fit_start/fit_end：
 
-自动时间搜索只在拟合窗内、方差合格、经空间抽样的点上进行（最多均匀取 300 对用于搜索）。
-所有时间候选使用相同的 RTK 点集合，避免某个偏移只匹配到较容易的航段而占优。
-每个偏移都从原始轨迹插值、补偿杆臂，用保留约 70% 较小残差的加权 SVD 代价比较。
-选出时间偏移后，重新匹配全部有效 RTK，再执行原来的 RANSAC 和加权 SVD。
-搜索仅返回网格估计值，不是传感器硬同步标定；地图漂移可能影响它。
-静止、匀速直线或特定周期运动下，时间差可能与平移/旋转混淆。
-若代价几乎不变化、没有足够非共线支持或最佳值在搜索边界，程序保留曲线和诊断后报错，需换窗口/范围或使用已知人工偏移。
-`auto_time_offset=true` 时成功估计值替代 `time_offset`，两者不会相加；报告同时保存请求值与实际采用值。
+1. 优先使用协方差合格点；有原始解状态时优先选择固定解。数据不足会报警，允许备用数据求解。
+2. 检查片段的运动范围、非共线程度，排除只有静止/近直线支撑的可信候选。
+3. 各窗口使用相同时间支持的点搜索偏差，进行截尾加权 SVD，再统计内点比例和误差。
+4. 比较相邻不同窗口的旋转、平移效果和时间偏差；近乎重复/完全包含的窗口不重复计独立支持。
+5. 优先选择多窗口一致的结果，兼顾空间覆盖、GNSS 方差、固定解比例和残差；不是只挑最低 RMSE。
+6. 合并一致窗口，再执行 RANSAC + 加权 SVD；全程残差仍统计、绘图，不删除窗外点。
+7. 没有可靠共识时，尝试最佳候选或全程备用 SVD，标为不可信并报警；只要实际求得有效 RT，仍按用户要求导出。
 
-**局部验收与全程准确性是两件事。** 默认 `validation_scope=all` 保留全程内点比例检查。
-显式设置 `fit_window` 后，在拟合内点 RMSE 达标的基础上，仅检查窗内所有方差合格点的内点比例，
-允许输出“由可信中段估计的固定变换”；窗口外的误差不会因此消失。
-仍会报告全程误差，图标题注明 LOCAL 验收范围，若全程误差较大则给出 `global_warning`。
-确认中段诊断后，才可用同样参数、`alignment_only:=false` 和一个新输出目录导出地图。
-导出使用全部保存帧，但只应用同一个刚体变换，不修复后段地图漂移。
+质量检查未通过不会伪装成达标。完全无法求出变换时，程序不会用单位矩阵或随意的旋转代替。
+固定刚体变换不会对地图做缩放或局部变形，也无法让任意 GNSS 偏差段都吻合。
+
+自动选择相关参数均在 launch 中可设置，默认无需按每次飞行修改：
+
+| ROS 参数 | 默认值 | 作用 |
+|---|---:|---|
+| `auto_time_offset` | true | 每个候选窗口自动搜索固定偏差；false 使用 `time_offset` |
+| `offset_min/max/step` | -2 / 2 / 0.1 s | 时间搜索范围/最大步长，不与 time_offset 相加 |
+| `window_seconds` | 120 s | 基准窗口长度，自动也比较 60、240 s；短数据自动缩小 |
+| `max_xy_variance` | 0.04 m² | 优先点 East/North 方差上限，0 不限制 |
+| `max_z_variance` | 0.25 m² | 优先点 Up 方差上限，0 不限制 |
+| `min_motion_span` | 10 m | 可信窗口的轨迹范围下限 |
+| `min_motion_ratio` | 0.02 | 轨迹第二/第一奇异值之比下限，约束非共线程度 |
+| `consistency_distance` | 2 m | 相邻候选变换在轨迹参考点的允许差异 |
+| `consistency_angle` | 2 deg | 候选旋转差上限 |
+| `consistency_time` | 0.3 s | 候选时间偏差差异上限 |
+| `min_consistent_windows` | 2 | 至少多少个不同窗口支持同一解（含自身） |
+
+静止、匀速直线和特定周期运动可能无法辨识时间差；此时保留人工 `time_offset` 并报警。
+最佳偏差位于搜索边界也会报警，不把它当作可靠时间标定。候选窗口最多 120 个、每窗搜索最多 160 个空间样本，
+最终合并拟合使用完整符合条件的空间抽样点。自动时间搜索和自动选段是启发式估计，不保证识别所有系统性偏差。
+
+### 北云固定解原始状态的记录
+
+更新后的北云驱动在 `/rtk/solution_quality` 发布 `std_msgs/String`，内容为：
+
+```text
+timestamp,sol_status,pos_type
+```
+
+每条消息使用对应 NavSatFix 的测量时间戳，例如 `1792129778.000000000,SOL_COMPUTED,NARROW_INT`。
+记录节点将其写入 `rtk_quality.csv`，离线按时间戳精确关联；不会因两个话题回调先后不同而把状态配错。
+目前识别 `SOL_COMPUTED` 下的 NARROW_INT、L1_INT、WIDE_INT、RTK_FIXED、FIXED 为固定解。
+标准 NavSatStatus 不用于判断 fixed/float。旧 bag 或其他驱动没有该话题时状态为 unknown，
+程序仍依据方差、运动和跨窗口一致性选段，并在终端及报告说明状态缺失。
+新采集可录制该话题，或建图时让记录节点直接监听；旧 bag 不会凭空获得过去未记录的解状态。
+**本次涉及北云 C++ 驱动更新，ROS1 部署后需重新 `catkin_make`。**
 
 ## 5. 输出与验收
 
@@ -243,13 +251,16 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 - `residuals.csv`：全部时间匹配点的 XYZ/三维残差、是否拟合样本、是否在门限内；存在候选变换时生成。
 - `trajectory_comparison.png`：轨迹对比图，在正常输入可读取的情况下，配准成功或失败都会生成。
 - `diagnostic.json`：绘图所用候选变换、来源、验收状态及失败原因。
-- `matched_pairs.csv`：地图系天线点、RTK ENU 点、原始三轴方差、是否在拟合时间窗以及 `quality_pass`，供进一步排查。
-- `time_offset_search.csv/png`：启用自动时间搜索时，各偏移对应的代价及曲线。
+- `matched_pairs.csv`：全部匹配天线点、三轴方差、采用窗口/质量标记及 `rtk_fixed`（1=固定、0=已知非固定、-1=未知）。
+- `auto_windows.json`：所有候选窗口的运动范围、误差、时间偏差及一致性支持数量。
+- `automatic_selection.png`：候选窗口的误差/时间偏差图，星号表示采用窗口。
 - `map_enu.pcd`：ENU 地图，binary XYZ float32；原保存格式没有可靠强度，本工具不输出 intensity。
 
-完整成功的 `alignment.json.status` 为 `complete`；只对齐为 `alignment_validated`；
+完整成功的 `alignment.json.status` 为 `complete`，有警告但成功导出为 `complete_with_warnings`；
+只对齐为 `alignment_validated` 或 `alignment_with_warnings`；
 PCD 导出失败为 `map_export_failed`，不会留下半张 map_enu.pcd。
-拟合或质量验收失败为 `alignment_failed`，有效 `T_enu_map` 为 null，保留诊断文件但不导出地图。
+仅完全无法计算非退化变换时为 `alignment_failed`，`T_enu_map` 为 null，保留能生成的诊断。
+`quality_passed` 与导出状态独立，所有未达标项目写入 `warnings` 并在终端输出。
 
 ### 轨迹诊断图
 
@@ -263,13 +274,14 @@ PCD 导出失败为 `map_export_failed`，不会留下半张 map_enu.pcd。
 4. 右下：三轴残差和三维距离随时间变化，红色虚线为内点门限。
 
 所有匹配点都画出，包括外点；灰色对应连线最多显示 120 条，避免轨迹被遮住。
-RANSAC 内点不足时优先画被拒绝的候选；没有候选但符合拟合时间窗和协方差门限的点可以做 SVD 时，
-仅为诊断生成全点 SVD 变换；图片和 `diagnostic.json` 会明确标注未经验收。
+质量不足时展示实际采用的备用变换并标为 QUALITY WARNINGS，地图仍使用这个变换导出。
+候选窗口筛选结果在 `automatic_selection.png` 中展示，主诊断图保留全部有效匹配点。
 完全没有变换时仍输出原始轨迹及相对高度图，对齐及残差子图注明 unavailable。
 时间无重叠时会显示完整有效输入轨迹，不生成虚假的时间对应关系。
 输入文件无法读取、格式损坏或输出目录不可写时，无法保证绘图；输出目录已存在仍拒绝覆盖。
 
-质量失败继续以退出码 1 结束；图片的存在不代表配准通过，也不会跳过地图导出前的质量门限。
+质量不足不再导致退出码 1，也不阻止导出；无可计算变换、文件损坏或地图导出失败仍以非零退出码结束。
+图片或地图存在不代表质量通过，必须查看 `quality_passed`、`warnings` 和全程误差。
 输出目录必须不存在，避免覆盖上一轮结果。支持 Voxel-SLAM 默认 binary PCD，也支持 ASCII；不支持 binary_compressed。
 
 至少检查全程/分航段残差，以及起终点附近地图的一致性。低配准残差不能证明每个地图点都准确；
@@ -282,6 +294,5 @@ python3 -m unittest discover -s src/gnss_to_enu/tests -v
 ```
 
 覆盖非零杆臂、时间插值、已知 SE(3) 恢复、异常点、直线退化、PCD 读取/重建和文件覆盖保护；
-新增测试覆盖 RMSE 超限、内点不足、抽样不足、退化、无时间重叠及无有效 RTK 时的诊断图和无效变换保护；
-覆盖时间窗、协方差过滤、非零杆臂下自动恢复时间差、局部通过/全程失败的区别，以及时间搜索边界和不可辨识运动。
+新增测试覆盖 RMSE 超限、内点不足、抽样不足、退化、无时间重叠及无有效 RTK 时的诊断图和无效变换保护。
 ROS1 构建与真实板卡/rosbag 回放需在部署环境验证。

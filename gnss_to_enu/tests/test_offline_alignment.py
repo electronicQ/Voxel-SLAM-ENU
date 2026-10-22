@@ -21,8 +21,7 @@ class AlignmentTests(unittest.TestCase):
     def test_ros_parameter_entrypoint(self):
         params={'~session':'/data/session with spaces', '~rtk':'/data/rtk.csv',
                 '~output':'/data/enu', '~lever_arm':[.1,-.2,.3], '~alignment_only':True,
-                '~sample_distance':2., '~datum':'/data/datum.json', '~auto_time_offset':True,
-                '~fit_start':100., '~fit_end':450., '~validation_scope':'fit_window'}
+                '~sample_distance':2., '~datum':'/data/datum.json'}
         ros=SimpleNamespace(init_node=lambda name:None, loginfo=lambda msg:None,
                             get_param=lambda key,*default:params[key] if key in params else default[0])
         with patch.dict('sys.modules', {'rospy':ros}), patch.object(a,'main') as main:
@@ -31,9 +30,6 @@ class AlignmentTests(unittest.TestCase):
             self.assertEqual(argv[argv.index('--session')+1],'/data/session with spaces')
             self.assertEqual(argv[argv.index('--lever-arm')+1:argv.index('--lever-arm')+4],['0.1','-0.2','0.3'])
             self.assertIn('--alignment-only',argv)
-            self.assertIn('--auto-time-offset',argv)
-            self.assertEqual(argv[argv.index('--fit-start')+1],'100.0')
-            self.assertEqual(argv[argv.index('--validation-scope')+1],'fit_window')
             self.assertEqual(argv[argv.index('--sample-distance')+1],'2.0')
             self.assertEqual(argv[argv.index('--datum')+1],'/data/datum.json')
             params['~alignment_only']='false'
@@ -101,11 +97,21 @@ class AlignmentTests(unittest.TestCase):
             np.testing.assert_allclose(cloud[:2],expected,atol=1e-5)
             trajectory=np.loadtxt(out/'trajectory_enu.tum')
             np.testing.assert_allclose(a.quaternion_matrix(trajectory[10,4:]),r@a.quaternion_matrix(poses[10,4:]),atol=1e-8)
-            self.assertEqual(json.loads((out/'alignment.json').read_text())['status'],'complete')
+            self.assertIn(json.loads((out/'alignment.json').read_text())['status'],('complete','complete_with_warnings'))
             self.assertTrue((out/'trajectory_comparison.png').stat().st_size > 10000)
-            self.assertTrue(json.loads((out/'diagnostic.json').read_text())['candidate_validated'])
+            self.assertIsNotNone(json.loads((out/'diagnostic.json').read_text())['candidate_T_enu_map'])
             with self.assertRaises(ValueError):
                 a.main(args)
+            # A computable transform MUST export the map even when quality thresholds fail.
+            warning_args=args.copy()
+            warning_args[warning_args.index('--output')+1]=str(root/'warning_export')
+            warning_args+=['--min-pairs','1000']
+            with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+                a.main(warning_args)
+            warning_report=json.loads((root/'warning_export'/'alignment.json').read_text())
+            self.assertEqual(warning_report['status'],'complete_with_warnings')
+            self.assertFalse(warning_report['quality_passed'])
+            self.assertTrue((root/'warning_export'/'map_enu.pcd').exists())
             (session/'3.pcd').unlink()
             args[args.index('--output')+1]=str(root/'missing')
             with self.assertRaises(ValueError):
@@ -149,100 +155,81 @@ class AlignmentTests(unittest.TestCase):
                         args+=['--inlier-threshold','0.001','--min-inlier-ratio','0.99']
                     if case=='too_few_samples':
                         args+=['--sample-distance','1000']
-                    with self.assertRaises(ValueError), contextlib.redirect_stdout(io.StringIO()):
-                        a.main(args)
+                    uncomputable=case in ('degenerate','no_time_overlap','no_valid_rtk')
+                    if uncomputable:
+                        with self.assertRaises(ValueError), contextlib.redirect_stdout(io.StringIO()):
+                            a.main(args)
+                    else:
+                        with contextlib.redirect_stdout(io.StringIO()): a.main(args)
                     self.assertTrue((output/'trajectory_comparison.png').stat().st_size > 10000)
                     report=json.loads((output/'alignment.json').read_text())
-                    self.assertEqual(report['status'],'alignment_failed')
-                    self.assertIsNone(report['T_enu_map'])
-                    diag=json.loads((output/'diagnostic.json').read_text())
-                    self.assertFalse(diag['candidate_validated'])
-                    self.assertFalse((output/'T_enu_map.txt').exists())
-                    self.assertFalse((output/'map_enu.pcd').exists())
-                    self.assertTrue((output/'matched_pairs.csv').exists())
-                    if case in ('degenerate','no_time_overlap','no_valid_rtk'):
-                        self.assertIsNone(diag['candidate_T_enu_map'])
-                        self.assertFalse((output/'residuals.csv').exists())
+                    self.assertFalse((output/'map_enu.pcd').exists())  # alignment-only
+                    if uncomputable:
+                        self.assertEqual(report['status'],'alignment_failed')
+                        self.assertIsNone(report['T_enu_map'])
+                        self.assertFalse((output/'T_enu_map.txt').exists())
                     else:
-                        self.assertIsNotNone(diag['candidate_T_enu_map'])
-                        self.assertTrue((output/'residuals.csv').exists())
+                        self.assertEqual(report['status'],'alignment_with_warnings')
+                        self.assertTrue(report['warnings'])
+                        self.assertIsNotNone(report['T_enu_map'])
+                        self.assertTrue((output/'T_enu_map.txt').exists())
 
-    def test_window_covariance_and_auto_offset_end_to_end(self):
+    def test_automatic_segments_quality_sidecar_and_time_search(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); session=root/'session'; session.mkdir()
-            relative=np.arange(0,60,.05)
-            stamps=1700000000.+relative
-            xyz=np.column_stack([8*np.sin(.18*relative)+.02*relative**2,
-                                 6*np.cos(.11*relative)+.1*relative, .01*relative**2])
-            yaw=.04*relative+.001*relative**2
-            poses=np.column_stack([stamps,xyz,np.zeros((len(stamps),2)),np.sin(yaw/2),np.cos(yaw/2)])
+            t=np.arange(0,185,.1); stamps=1700000000.+t
+            xyz=np.column_stack([12*np.sin(.07*t)+.004*t*t,15*np.cos(.05*t)+.2*t,2*np.sin(.03*t)])
+            yaw=.03*t+.0002*t*t
+            poses=np.column_stack([stamps,xyz,np.zeros((len(t),2)),np.sin(yaw/2),np.cos(yaw/2)])
             np.savetxt(session/'alidarState.txt',poses,fmt='%.12f')
             (root/'datum.json').write_text(json.dumps({'latitude':22.,'longitude':113.,'altitude':10.}))
-            r=a.quaternion_matrix([.1,.2,.3,.9]); translation=np.array([50.,-10.,4.])
-            lever=np.array([.3,-.1,.2])
-            rt=1700000000.+np.arange(2,56,.3)
-            with (root/'rtk.csv').open('w') as f:
-                w=csv.writer(f);w.writerow(['timestamp','east','north','up','var_e','var_n','var_u'])
+            r=a.quaternion_matrix([.1,.2,.3,.9]); tr=np.array([20.,-10.,5.]); lever=np.array([.3,-.2,.1])
+            rt=1700000000.+np.arange(2,180,1.)
+            with (root/'rtk.csv').open('w') as f,(root/'rtk_quality.csv').open('w') as q:
+                writer=csv.writer(f); quality=csv.writer(q)
+                writer.writerow(['timestamp','east','north','up','var_e','var_n','var_u'])
+                quality.writerow(['timestamp','sol_status','pos_type'])
                 for i,stamp in enumerate(rt):
-                    p,rotation=a.interpolate(poses,stamp+1.,.1)
-                    y=r@(p+rotation@lever)+translation
-                    # End sections and one middle point have bad positions AND large covariance.
-                    bad=(stamp-rt[0]<10 or stamp-rt[0]>40 or i==70)
-                    if bad: y+=np.array([10.,-8.,3.])
-                    v=.25 if bad else .0004
-                    w.writerow([format(stamp,'.9f'),*y,v,v,v])
-            base=['--session',str(session),'--rtk',str(root/'rtk.csv'),'--lever-arm',*map(str,lever),
-                  '--alignment-only','--sample-distance','0','--fit-start','10','--fit-end','40',
-                  '--max-xy-variance','0.01','--max-z-variance','0.04','--auto-time-offset',
-                  '--offset-min','-1.5','--offset-max','1.5','--offset-step','0.1','--max-gap','0.1',
-                  '--inlier-threshold','0.05','--max-rmse','0.01','--min-inlier-ratio','0.8']
-            output=root/'local'
-            with contextlib.redirect_stdout(io.StringIO()):
-                a.main(base+['--output',str(output),'--validation-scope','fit_window'])
+                    p,rot=a.interpolate(poses,stamp+1.,.2)
+                    y=r@(p+rot@lever)+tr
+                    bad=i<35 or i>135
+                    if bad: y+=np.array([12.,-10.,4.])
+                    v=.5 if bad else .0004
+                    writer.writerow([format(stamp,'.9f'),*y,v,v,v])
+                    quality.writerow([format(stamp,'.9f'),'SOL_COMPUTED','NARROW_FLOAT' if bad else 'NARROW_INT'])
+            output=root/'out'
+            args=['--session',str(session),'--rtk',str(root/'rtk.csv'),'--output',str(output),
+                  '--lever-arm',*map(str,lever),'--alignment-only','--auto-time-offset',
+                  '--offset-min','0','--offset-max','2','--offset-step','.2','--max-gap','.2',
+                  '--window-seconds','60','--sample-distance','0','--min-inlier-ratio','.8',
+                  '--inlier-threshold','.1','--max-rmse','.05']
+            with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+                a.main(args)
             report=json.loads((output/'alignment.json').read_text())
             self.assertAlmostEqual(report['time_offset_s'],1.)
-            self.assertEqual(report['fit_reference_rtk_timestamp'],rt[0])
-            self.assertEqual(report['validation_scope'],'fit_window')
-            self.assertIsNotNone(report['global_warning'])
+            self.assertTrue(report['trusted_segment_found'])
+            self.assertGreaterEqual(len(report['selected_windows']),2)
             self.assertLess(report['metrics']['all_inlier_ratio'],.8)
-            self.assertEqual(report['metrics']['validation_inlier_ratio'],1.)
+            self.assertFalse(report['quality_passed'])
+            self.assertEqual(report['status'],'alignment_with_warnings')
             transform=np.loadtxt(output/'T_enu_map.txt')
-            np.testing.assert_allclose(transform[:3,:3],r,atol=1e-8)
-            np.testing.assert_allclose(transform[:3,3],translation,atol=1e-8)
+            np.testing.assert_allclose(transform[:3,:3],r,atol=1e-7)
+            np.testing.assert_allclose(transform[:3,3],tr,atol=1e-7)
             pairs=np.genfromtxt(output/'matched_pairs.csv',delimiter=',',names=True)
-            self.assertTrue(np.any(pairs['quality_pass']==0))
-            self.assertTrue(np.all(pairs['quality_pass'][pairs['fit_sample']>0]==1))
-            self.assertTrue(np.all(pairs['in_fit_window'][pairs['fit_sample']>0]==1))
-            self.assertTrue((output/'time_offset_search.csv').exists())
-            self.assertTrue((output/'time_offset_search.png').exists())
+            selected=pairs['fit_sample']>0
+            self.assertTrue(np.all(pairs['quality_pass'][selected]==1))
+            self.assertTrue(np.all(pairs['rtk_fixed'][selected]==1))
+            self.assertTrue((output/'automatic_selection.png').exists())
+            self.assertTrue((output/'auto_windows.json').exists())
             self.assertTrue((output/'trajectory_comparison.png').exists())
-            global_output=root/'global'
-            with self.assertRaises(ValueError), contextlib.redirect_stdout(io.StringIO()):
-                a.main(base+['--output',str(global_output)])
-            self.assertFalse((global_output/'T_enu_map.txt').exists())
-            self.assertEqual(json.loads((global_output/'alignment.json').read_text())['validation_scope'],'all')
 
-    def test_offset_search_rejects_boundary_and_unobservable_motion(self):
-        from argparse import Namespace
+    def test_quality_sidecar_exact_stamp_and_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:
-            times=np.linspace(0,30,601)
-            # Circular constant-rate motion: changing time is indistinguishable from rotating the map.
-            positions=np.column_stack([10*np.cos(.2*times),10*np.sin(.2*times),np.zeros(len(times))])
-            poses=np.column_stack([times,positions,np.zeros((len(times),3)),np.ones(len(times))])
-            rt=np.arange(5,25,.5)
-            points=np.column_stack([10*np.cos(.2*(rt+1)),10*np.sin(.2*(rt+1)),np.zeros(len(rt))])
-            records=np.column_stack([rt,points,np.full((len(rt),3),.001)])
-            args=Namespace(offset_min=-2.,offset_max=2.,offset_step=.1,sample_distance=0.,
-                           max_gap=.1,lever_arm=[0,0,0],min_pairs=10,output=Path(tmp))
-            with self.assertRaisesRegex(ValueError,'unobservable'):
-                a.search_time_offset(poses,records,np.ones(len(rt),bool),np.ones(len(rt)),args)
-            # Nonconstant motion with true offset +1 outside a deliberately narrow search.
-            positions[:,0]+=.03*times**2
-            poses[:,1:4]=positions
-            records[:,1:4]=a.match_antenna(poses,records,1.,.1,[0,0,0])
-            args.offset_min=0.;args.offset_max=.5
-            with self.assertRaisesRegex(ValueError,'boundary'):
-                a.search_time_offset(poses,records,np.ones(len(rt),bool),np.ones(len(rt)),args)
+            p=Path(tmp)/'rtk_quality.csv'
+            stamps=np.array([1700000000.,1700000001.,1700000002.])
+            np.testing.assert_array_equal(a.read_quality(p,stamps),[-1,-1,-1])
+            p.write_text('timestamp,sol_status,pos_type\n1700000000.000000000,SOL_COMPUTED,NARROW_INT\n1700000001.000000000,SOL_COMPUTED,NARROW_FLOAT\n')
+            np.testing.assert_array_equal(a.read_quality(p,stamps),[1,0,-1])
 
     def test_binary_padding_ascii_and_truncation(self):
         with tempfile.TemporaryDirectory() as tmp:

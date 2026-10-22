@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 from sensor_msgs.msg import NavSatFix
 from nav_msgs.msg import Odometry
+from std_msgs.msg import String
 
 class GNSSToENU:
     def __init__(self):
@@ -26,6 +27,8 @@ class GNSSToENU:
         self.record_dir = rospy.get_param('~record_dir', '')
         self.enu_frame = rospy.get_param('~enu_frame', 'enu')
         self.altitude_reference = rospy.get_param('~altitude_reference', 'WGS84_ellipsoid')
+        self.quality_file = None
+        self.quality_writer = None
         self.record_file = None
         self.last_record_stamp = None
         self.csv_writer = None
@@ -39,6 +42,10 @@ class GNSSToENU:
             self.csv_writer.writerow(['timestamp', 'east', 'north', 'up', 'var_e', 'var_n', 'var_u',
                                       'status', 'covariance_type'])
             self.record_file.flush()
+            self.quality_file = (directory / 'rtk_quality.csv').open('x', newline='')
+            self.quality_writer = csv.writer(self.quality_file)
+            self.quality_writer.writerow(['timestamp','sol_status','pos_type'])
+            self.quality_file.flush()
             rospy.on_shutdown(self.close_recording)
 
         # 核心状态标志位
@@ -91,13 +98,32 @@ class GNSSToENU:
         # 订阅与发布
         self.pub = rospy.Publisher(self.pub_topic, Odometry, queue_size=10)
         self.sub = rospy.Subscriber(self.sub_topic, NavSatFix, self.gnss_cb, queue_size=1000)
+        if self.record_dir:
+            topic = rospy.get_param('~quality_topic', '/rtk/solution_quality')
+            self.quality_sub = rospy.Subscriber(topic, String, self.quality_cb, queue_size=1000)
 
         if self.use_auto_datum:
             rospy.loginfo(f"🚀 [GNSS2ENU] Node started. Waiting for valid Fix on {self.sub_topic} to AUTO-SET origin...")
         else:
             rospy.loginfo(f"🚀 [GNSS2ENU] Node started. Using MANUAL origin. Listening to {self.sub_topic}...")
 
+    def quality_cb(self, msg):
+        # Record a separate stamped sidecar so callback order cannot mislabel a fix.
+        try:
+            fields = next(csv.reader([msg.data]))
+            stamp = float(fields[0])
+            if len(fields) != 3 or not np.isfinite(stamp) or stamp <= 0:
+                raise ValueError('invalid quality record')
+            if self.quality_file is not None:
+                self.quality_writer.writerow([format(stamp,'.9f'),fields[1],fields[2]])
+                self.quality_file.flush()
+        except (ValueError, IndexError):
+            rospy.logwarn_throttle(5.0, 'Ignoring malformed GNSS solution quality message')
+
     def close_recording(self):
+        if self.quality_file is not None:
+            self.quality_file.close()
+            self.quality_file = None
         if self.record_file is not None:
             self.record_file.close()
             self.record_file = None

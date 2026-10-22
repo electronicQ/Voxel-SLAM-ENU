@@ -17,7 +17,8 @@ RTK NavSatFix → ENU 位置记录 → 时间匹配、杆臂补偿、SVD 配准
 - 默认使用第一条通过质量检查的 GNSS 数据作为 ENU 原点，也支持手动指定原点。
 - 记录 RTK 测量时间戳、ENU 位置、协方差和实际原点。
 - 基于结束时保存的轨迹（可选最终全局 BA）进行位置线性插值、姿态 SLERP 和天线杆臂补偿。
-- 使用空间抽样、RANSAC 和加权 SVD 估计固定尺度的地图→ENU 刚体变换。
+- 自动筛选多个候选片段，结合 RTK 协方差/原始解状态、运动覆盖、邻窗变换一致性，再用 RANSAC 和加权 SVD 估计固定尺度变换。
+- 自动比较候选片段的固定时间偏差，无需手工指定每次飞行的时间段。
 - 用最终逐帧位姿重建 ENU 点云地图，输出全程配准残差。
 
 刚体对齐仅改变地图整体位置和朝向，**不消除地图内部漂移或变形**。当前导出流程针对单次建图 session。
@@ -64,7 +65,10 @@ source devel/setup.bash
 
 根据实际雷达修改配置文件里的话题、外参、逐点时间等参数。
 LiDAR、IMU、RTK 的测量时间戳必须处于同一时间基准；本项目不会自动完成硬同步。
-RTK 输入默认为 `/rtk/navsatfix`（`sensor_msgs/NavSatFix`）。如需使用本仓库北云驱动，先按 [驱动说明](sensors/beiyun_gnss/README.md)设置串口及时间戳来源。
+RTK 输入默认为 `/rtk/navsatfix`（`sensor_msgs/NavSatFix`）。
+新版本北云驱动另发 `/rtk/solution_quality`，记录节点保存为 `rtk_quality.csv`，按相同测量时间戳离线关联。
+旧 bag/其他驱动没有该话题时仍可运行，但固定解状态标记为 unknown，不会根据 NavSatStatus 猜测。
+本次修改了北云 C++ 驱动，部署更新后请执行 `catkin_make`。如需使用本仓库北云驱动，先按 [驱动说明](sensors/beiyun_gnss/README.md)设置串口及时间戳来源。
 
 ### 2. 建图并记录 RTK
 
@@ -143,11 +147,10 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 这是一次性离线任务，结束后进程退出，不持续订阅数据；不会自动触发或等待 SLAM 结束保存。
 输出目录必须不存在。可传 `alignment_only:=true output:=/新的检查目录` 先检查配准；完整导出时另选新目录。
 原有 `rosrun gnss_to_enu align_voxel_enu.py --session ... --rtk ... --output ... --lever-arm LX LY LZ` 用法仍保留。
-默认拟合样本间三维距离为 1 m，全部时间匹配数据参与误差检查。可使用 `--sample-distance` 调整抽样距离。
+默认自动选段，并在候选片段内按 1 m 距离抽样；全部有效时间匹配点仍参与误差统计和绘图。
+**有可计算的刚体变换时，质量门限只报警，不阻止 ENU 地图导出**。没有可信片段时会尝试备用解，并明确标为不可信。
+若点数/几何退化导致完全无法计算变换，或输入文件缺失、输出不可写，则报错，不生成假地图。
 工具不进行尺度缩放、不使用 ICP 最近邻配对，也不会重复施加 LiDAR 外参。
-如果前后段不可靠，可选用 `fit_start/fit_end` 指定可信中段、`max_xy_variance/max_z_variance` 过滤拟合点，
-并通过 `auto_time_offset` 搜索小范围时间偏移。默认仍为全程验收；显式选择 `validation_scope:=fit_window`
-只代表窗内质量通过，不代表地图全程准确。排查命令和原理见 [ENU 工具说明](gnss_to_enu/README.md#中段可信前后段有疑问时的拟合方式)。
 参数门限、时间偏移符号及完整用法见 [ENU 工具说明](gnss_to_enu/README.md)。
 
 ## 输出文件
@@ -157,14 +160,16 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 | `map_enu.pcd` | ENU 点云地图，binary XYZ |
 | `trajectory_enu.tum` | ENU 下的最终 IMU 位姿轨迹 |
 | `T_enu_map.txt` | 4×4 变换，`p_enu = R_enu_map * p_map + t_enu_map` |
-| `alignment.json` | 原点、杆臂、参数、误差统计及导出状态 |
+| `alignment.json` | 原点、变换、自动选中窗口、实际时间偏差、质量是否达标、告警及导出状态 |
 | `residuals.csv` | 全部匹配点的三轴及三维残差（存在候选变换时） |
 | `trajectory_comparison.png` | 无论配准通过或失败均输出的轨迹对比图 |
 | `diagnostic.json` | 图片所用变换的来源、是否通过验收及失败原因 |
-| `matched_pairs.csv` | 时间匹配后的地图系/ENU 天线点对、原始方差、时间窗和质量标记 |
-| `time_offset_search.csv/png` | 自动搜索时间偏移时的代价和曲线 |
+| `matched_pairs.csv` | 全部匹配点、三轴方差、自动选段标记及 fixed/float/unknown 标记 |
+| `auto_windows.json` | 各候选窗口的运动范围、误差、估计时间偏差及一致性支持数量 |
+| `automatic_selection.png` | 候选窗口质量/时间偏差图，星号标出采用窗口 |
 
-完整导出成功时 `alignment.json.status` 为 `complete`。
+完整导出无警告时 `alignment.json.status=complete`；有警告但导出成功为 `complete_with_warnings`。
+`quality_passed` 独立表示质量检查是否通过，不能仅凭地图文件存在来判断精度。
 
 运行对齐后，直接查看输出目录中的 `trajectory_comparison.png`：
 
@@ -177,8 +182,8 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 保留全部匹配点（含外点），只对灰色连线均匀稀疏显示，最多 120 条，避免遮挡。
 求解失败时仍保存图片；完全没有可用变换时显示原始轨迹形状/相对高度，无法计算的对齐图和残差会注明原因。
 若时间没有重叠，原始形状图改用完整可用输入轨迹，并不伪造对应点。
-失败候选会明确标注“diagnostic only”，只存于 `diagnostic.json`，不写有效 `T_enu_map.txt` 或 ENU 地图。
-质量检查失败仍返回非零退出码，且 `alignment.json.status=alignment_failed`；这是保留诊断的正常失败流程。
+质量超限时图中注明 QUALITY WARNINGS，仍输出变换、ENU 轨迹和地图。只有完全无法计算变换时才使用
+`alignment_failed` 并返回非零退出码；此时保留可生成的轨迹诊断，不写单位矩阵冒充结果。
 输出目录必须是新的；文件缺失或损坏导致输入轨迹无法读取时，无法保证生成轨迹图。
 部署前检查全程及各航段残差、起终点地图一致性；配准结果不能替代对原地图质量的验收。
 
@@ -189,9 +194,8 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 python3 -m unittest discover -s gnss_to_enu/tests -v
 ```
 
-已通过 10 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建、自动/手动原点记录及 ROS 参数入口映射；
-还覆盖拟合时间窗、协方差筛选、自动恢复时间偏移和局部/全程验收区别。
-已检查 Python 语法和 launch XML，并已在 ROS1 环境测试通过。新增诊断绘图及时间窗/自动时间偏移功能已通过合成数据测试，更新后的 ROS1 回放待验证。
+已通过 10 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建，自动/手动原点记录及 ROS 参数入口映射。
+已检查 Python 语法和 launch XML，并已在 ROS1 环境测试通过。新增自动选段、时间搜索、解状态记录和报警导出逻辑已通过合成测试；本次驱动 C++ 改动及新流程尚待 ROS1 编译、回放验证。
 
 ## 上游与许可证
 

@@ -1,7 +1,7 @@
 <launch>
   <!-- 离线一次性任务：先完成 Voxel-SLAM 结束保存，再单独运行本 launch。
        可编辑下方 default，或启动时用 参数名:=值 覆盖。
-       放宽门限仅改变接受条件，不会修复时间错位、杆臂错误或地图内部漂移。 -->
+       自动选择可信片段，无需指定起止时间。质量指标仅报警，不阻止已有有效 RT 的地图导出。 -->
 
   <!-- Voxel-SLAM session 目录，包含结束时保存的轨迹及逐帧 PCD。 -->
   <arg name="session" default="$(env HOME)/voxel_enu_data/maps/flight01" />
@@ -34,38 +34,42 @@
        已统一时间基准时用 0；不属于宽容门限，错误偏移会引入与运动有关的残差。 -->
   <arg name="time_offset" default="0.0" />
 
-  <!-- 可选自动时间偏移搜索。false 使用上方 time_offset；true 在下方范围搜索。
-       只用拟合时间窗内且协方差合格的点，从原始 SLAM 轨迹逐次插值。
-       需有转弯、加减速等变化；静止、匀速或特殊周期运动可能无法确定时间差。
-       输出 time_offset_search.csv/png；最优值在边界或代价几乎不变时拒绝自动估计。 -->
-  <arg name="auto_time_offset" default="false" />
-  <!-- 搜索下界/上界，单位 s，均为绝对偏移：t_map=t_RTK+offset。
-       范围越宽越慢，也更容易受漂移影响；先小范围搜索，不是越宽越好。 -->
+  <!-- 自动选段始终启用，不需手工填写某次飞行的时间窗。
+       true：各候选片段分别搜索固定时间偏差；false：使用 time_offset。
+       时间搜索不可辨识或最优值在边界时会报警，不把它当作可靠同步标定。 -->
+  <arg name="auto_time_offset" default="true" />
+  <!-- 搜索绝对时间偏差范围 [s]，不是加在 time_offset 上的增量。
+       范围越宽越慢、越容易出现运动歧义，建议先小范围搜索。 -->
   <arg name="offset_min" default="-2.0" />
   <arg name="offset_max" default="2.0" />
-  <!-- 搜索步长，单位 s，必须大于 0。越小更细但越慢；越大更快但估计较粗。
-       程序均匀覆盖两端，实际步长不大于此值；返回网格最优值，不做亚网格插值。 -->
+  <!-- 搜索最大步长 [s]：越小越细但越慢；越大较快但结果更粗。 -->
   <arg name="offset_step" default="0.1" />
 
-  <!-- 拟合时间窗：相对 CSV 第一条数据有效的 RTK 记录的秒数（协方差上限过滤前）。
-       start=0、end=-1 表示全程；例如 100 到 450 只用中段估计变换。
-       缩小时间窗可避开已知坏段，但过短/近直线会退化，且不能证明窗外轨迹准确。
-       此窗口同时用于自动时间搜索和最终 RANSAC/SVD，不删除窗外诊断点或地图帧。 -->
-  <arg name="fit_start" default="0.0" />
-  <arg name="fit_end" default="-1.0" />
-
-  <!-- 离线拟合点的协方差上限，单位 m^2；0 表示不额外限制上限（仍拒绝无效/非正方差）。
-       xy：East/North 任一超限就不参与拟合；z：Up 超限不参与拟合。
-       越小选点越严格、可用点越少；越大越宽容。方差小不保证没有系统性误差。
-       仅过滤拟合/时间搜索候选，全部有效匹配点仍绘图、输出方差和 quality_pass。 -->
-  <arg name="max_xy_variance" default="0.0" />
-  <arg name="max_z_variance" default="0.0" />
-
-  <!-- 验收范围：all 保留原来的全部匹配点内点比例检查（默认）。
-       fit_window 只检查时间窗内且协方差合格的全部匹配点，必须显式选择。
-       两种范围都要求拟合内点数、比例和 RMSE 达标；fit_window 不代表全程精度通过。
-       fit_window 通过后可变换整张地图，但不能修复窗外漂移；图和报告会明确标注。 -->
-  <arg name="validation_scope" default="all" />
+  <!-- 自动滑动窗口的基准长度 [s]，同时比较半长和两倍长度的窗口。
+       越长覆盖更多运动，但容易混入差 GNSS；越短更局部，可能缺少转弯和独立支持。
+       程序自动遍历不同位置，每个窗口约四分之一长度移动，不指定飞行起止时间。 -->
+  <arg name="window_seconds" default="120.0" />
+  <!-- 优先拟合点的 XY / Z 方差上限 [m^2]，0 表示不限制上限。
+       越小筛选越严格、可用点越少；越大较宽容。
+       固定解原始标志可用时优先使用；标准 NavSatStatus 不作为 fixed/float 判断。
+       无合格片段时仍尝试备用解并报警；所有有效匹配点仍保留在诊断图中。 -->
+  <arg name="max_xy_variance" default="0.04" />
+  <arg name="max_z_variance" default="0.25" />
+  <!-- 片段运动范围下限 [m]。越大要求更长运动，越小可能接纳覆盖不足的片段。 -->
+  <arg name="min_motion_span" default="10.0" />
+  <!-- 轨迹第二/第一奇异值比下限，约束非共线程度。
+       越大越要求转弯/多方向运动；越小越容易接纳近直线、旋转不稳定的片段。 -->
+  <arg name="min_motion_ratio" default="0.02" />
+  <!-- 相邻独立片段估计的变换，在轨迹参考点上的允许差异 [m]。
+       越小一致性越严格；越大更容易把不同变换视为一致。 -->
+  <arg name="consistency_distance" default="2.0" />
+  <!-- 相邻片段旋转差上限 [deg]：越小越严格，越大越宽容。 -->
+  <arg name="consistency_angle" default="2.0" />
+  <!-- 相邻片段估计时间差的允许差异 [s]：越小越严格，越大越宽容。 -->
+  <arg name="consistency_time" default="0.3" />
+  <!-- 至少由多少个不同窗口共同支持（含自身，至少 2）。
+       越大越强调多段支持，越小越容易接受局部解；不满足则报警、使用备用变换导出。 -->
+  <arg name="min_consistent_windows" default="2" />
 
   <!-- 位置线性插值、姿态 SLERP 所允许的相邻 SLAM 位姿最大时间间隔，单位 s，必须大于 0。
        越大：允许跨更长的轨迹间隔插值，可能匹配更多 RTK 点，但插值误差风险更高。
@@ -84,28 +88,28 @@
   <!-- 内点判定的三维欧氏残差门限，单位 m，必须大于 0。
        残差为变换后的 SLAM 天线位置与对应 RTK ENU 天线位置的三维距离。
        越大：更多点可能被判为内点，较宽容，但异常点和漂移更容易被接纳。
-       越小：内点一致性要求更严格，可能报 Insufficient alignment inliers。
-       同时用于 RANSAC、最终内点重判，以及全部匹配点的内点比例统计。
+       越小：内点一致性要求更严格，更容易报警内点不足并使用备用候选。
+       同时用于 RANSAC、自动选段、最终内点重判，以及全部匹配点的内点比例统计。
        放宽此门限不会自动减小真实配准误差，也不等于提高精度。 -->
   <arg name="inlier_threshold" default="1.0" />
 
   <!-- 最少拟合内点对数，整数，至少为 3。
        空间抽样后点数及最终拟合内点数均需达到此值。
-       越大：要求更多数据支持结果，更严格，短轨迹更容易失败。
+       越大：自动片段要求更多数据支持，短轨迹更容易降级为报警导出。
        越小：少量点也可通过，但可靠性更难保证；点数够仍不能解决共线退化。
        不改变 RANSAC 每次随机抽取的数量，该数量固定为 3 对。 -->
   <arg name="min_pairs" default="10" />
 
   <!-- 最低内点比例，范围 (0,1]；0.5 表示至少 50%。
-       检查抽样拟合点的内点比例，以及 validation_scope 指定范围的匹配点内点比例。
+       用于自动候选片段质量判断，以及最终片段/全程的报警检查。
        越大：要求更大范围的轨迹一致，更严格；越小：允许更多外点，较宽容。
        过小可能使局部航段拟合很好、其他航段明显错位的结果通过。
-       与 min_pairs 必须同时满足，不是二选一。 -->
+       与 min_pairs 一起判定片段是否可信；最终超限仍导出，但在报告中标为警告。 -->
   <arg name="min_inlier_ratio" default="0.5" />
 
   <!-- 最终拟合内点的三维残差 RMSE 上限，单位 m，必须大于 0。
        越大：允许更大的平均拟合误差，更容易通过最终验收。
-       越小：精度要求更高，可能报 Alignment failed quality gate。
+       越小：片段精度要求更高，超限会报警，但有有效变换时仍导出地图。
        仅是结果验收门限，不参与 SVD 求解或内点选择，因此不能直接解决内点不足。
        此处检查的是抽样拟合内点，不是全部点的 all_rmse_m；应同时查看全程误差报告。 -->
   <arg name="max_rmse" default="0.6" />
@@ -118,7 +122,7 @@
   <arg name="ransac_trials" default="500" />
 
   <!-- 无论配准通过或失败，均在 output 生成 trajectory_comparison.png 供诊断。
-       蓝色为 SLAM 天线轨迹，橙色为 RTK；失败候选仅供查看，不用于导出地图。
+       蓝色为 SLAM 天线轨迹，橙色为 RTK；质量超限会报警，有有效变换仍导出地图。
        需要 python3-matplotlib；无图形桌面也可生成 PNG。
        将上述配置传入节点的 ROS 私有参数；只需修改上方 arg，无需重复修改下方映射。 -->
   <node pkg="gnss_to_enu" type="align_voxel_enu.py" name="align_voxel_enu"
@@ -134,11 +138,15 @@
     <param name="offset_min" value="$(arg offset_min)" type="double" />
     <param name="offset_max" value="$(arg offset_max)" type="double" />
     <param name="offset_step" value="$(arg offset_step)" type="double" />
-    <param name="fit_start" value="$(arg fit_start)" type="double" />
-    <param name="fit_end" value="$(arg fit_end)" type="double" />
+    <param name="window_seconds" value="$(arg window_seconds)" type="double" />
     <param name="max_xy_variance" value="$(arg max_xy_variance)" type="double" />
     <param name="max_z_variance" value="$(arg max_z_variance)" type="double" />
-    <param name="validation_scope" value="$(arg validation_scope)" type="str" />
+    <param name="min_motion_span" value="$(arg min_motion_span)" type="double" />
+    <param name="min_motion_ratio" value="$(arg min_motion_ratio)" type="double" />
+    <param name="consistency_distance" value="$(arg consistency_distance)" type="double" />
+    <param name="consistency_angle" value="$(arg consistency_angle)" type="double" />
+    <param name="consistency_time" value="$(arg consistency_time)" type="double" />
+    <param name="min_consistent_windows" value="$(arg min_consistent_windows)" type="int" />
     <param name="max_gap" value="$(arg max_gap)" type="double" />
     <param name="sample_distance" value="$(arg sample_distance)" type="double" />
     <param name="inlier_threshold" value="$(arg inlier_threshold)" type="double" />

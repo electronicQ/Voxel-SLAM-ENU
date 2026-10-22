@@ -17,6 +17,8 @@
 #include <sensor_msgs/NavSatFix.h>
 #include <sensor_msgs/NavSatStatus.h>
 #include <std_msgs/String.h>
+#include <iomanip>
+#include <sstream>
 
 #include "beiyun_gnss/nmea_parser.h"
 
@@ -176,6 +178,7 @@ class BeiyunGnssNode {
     last_published_wall_time_ = last_valid_bestpos_wall_time_;
     // NavSatFix 是融合后的正式输出；三个 raw 话题用于现场排查串口内容。
     navsatfix_pub_ = nh_.advertise<sensor_msgs::NavSatFix>(navsatfix_topic_, 10);
+    quality_pub_ = nh_.advertise<std_msgs::String>("/rtk/solution_quality", 100);
     raw_rmc_pub_ = nh_.advertise<std_msgs::String>("/rtk/raw_rmc", 10);
     raw_gga_pub_ = nh_.advertise<std_msgs::String>("/rtk/raw_gga", 10);
     raw_bestposa_pub_ = nh_.advertise<std_msgs::String>("/rtk/raw_bestposa", 10);
@@ -318,6 +321,13 @@ class BeiyunGnssNode {
         bestpos_.altitude_stddev * bestpos_.altitude_stddev;
     message.position_covariance_type =
         sensor_msgs::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN;
+    // Match quality to this exact measurement stamp, independently of topic delivery order.
+    std_msgs::String quality;
+    std::ostringstream quality_stream;
+    quality_stream << std::fixed << std::setprecision(9) << stamp.toSec()
+                   << "," << bestpos_.sol_status << "," << bestpos_.pos_type;
+    quality.data = quality_stream.str();
+    quality_pub_.publish(quality);
     navsatfix_pub_.publish(message);
     last_published_stamp_ = stamp;
     last_published_wall_time_ = ros::WallTime::now();
@@ -394,6 +404,7 @@ class BeiyunGnssNode {
   double last_published_bestpos_seconds_{0.0};
   // ROS 发布器
   ros::Publisher navsatfix_pub_;
+  ros::Publisher quality_pub_;
   ros::Publisher raw_rmc_pub_;
   ros::Publisher raw_gga_pub_;
   ros::Publisher raw_bestposa_pub_;

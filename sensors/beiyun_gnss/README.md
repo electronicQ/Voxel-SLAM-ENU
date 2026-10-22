@@ -43,7 +43,8 @@ signal_timeout_seconds = 2.0
 | `~baudrate` | `115200` | 串口波特率 |
 | `~serial_timeout` | `0.1` | 串口读取超时，秒 |
 | `~frame_id` | `gps` | NavSatFix 坐标系名称 |
-| `~navsatfix_topic` | `/rtk/navsatfix` | 正式 NavSatFix 话题 |
+| `~navsatfix_topic` | `/rtk/solution_quality` | `std_msgs/String` | 与 NavSatFix 同一测量时间戳的 `timestamp,sol_status,pos_type`，供离线 ENU 自动选段识别固定解 |
+| `/rtk/navsatfix` | 正式 NavSatFix 话题 |
 | `~pair_tolerance_seconds` | `0.2` | BESTPOSA 与 RMC 时间配对容差，秒 |
 | `~timestamp_source` | `gprmc_utc` | 时间戳来源：`gprmc_utc` 或 `system_now` |
 | `~signal_timeout_seconds` | `2.0` | 超过该时间没有有效输出时提示信号异常，秒 |

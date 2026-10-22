@@ -37,8 +37,9 @@ class RecordingTests(unittest.TestCase):
             ros.Subscriber=lambda *a,**k: None
             sensor=ModuleType('sensor_msgs.msg'); sensor.NavSatFix=S(COVARIANCE_TYPE_UNKNOWN=0)
             nav=ModuleType('nav_msgs.msg'); nav.Odometry=odometry
+            std=ModuleType('std_msgs.msg'); std.String=S
             with patch.dict(sys.modules,{'rospy':ros,'sensor_msgs':ModuleType('sensor_msgs'),
-                                         'sensor_msgs.msg':sensor,'nav_msgs':ModuleType('nav_msgs'),'nav_msgs.msg':nav}):
+                                         'sensor_msgs.msg':sensor,'nav_msgs':ModuleType('nav_msgs'),'nav_msgs.msg':nav,'std_msgs':ModuleType('std_msgs'),'std_msgs.msg':std}):
                 path=Path(__file__).resolve().parents[1]/'scripts'/'gnss_to_enu.py'
                 spec=importlib.util.spec_from_file_location('converter',path)
                 module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
@@ -54,14 +55,19 @@ class RecordingTests(unittest.TestCase):
                     node.gnss_cb(invalid_first)
                     self.assertFalse(node.has_origin)
                 first=fix(1700000000.)
+                node.quality_cb(S(data='1700000000.000000000,SOL_COMPUTED,NARROW_INT'))
                 node.gnss_cb(first)
                 node.gnss_cb(fix(1700000000.1,113.000001))
                 node.gnss_cb(fix(1700000000.1))  # duplicate
                 invalid=fix(1700000000.2); invalid.latitude=float('nan'); node.gnss_cb(invalid)
                 unknown=fix(1700000000.3); unknown.position_covariance_type=0; node.gnss_cb(unknown)
+                node.quality_cb(S(data='1700000000.100000000,SOL_COMPUTED,NARROW_FLOAT'))
                 node.close_recording()
                 with (Path(tmp)/'rtk_enu.csv').open() as stream: rows=list(csv.DictReader(stream))
                 self.assertEqual(len(rows),2)
+                with (Path(tmp)/'rtk_quality.csv').open() as stream: qualities=list(csv.DictReader(stream))
+                self.assertEqual(qualities[0]['pos_type'],'NARROW_INT')
+                self.assertEqual(qualities[1]['pos_type'],'NARROW_FLOAT')
                 self.assertEqual(len(published),1)
                 self.assertIs(published[0].header.stamp,first.header.stamp)
                 self.assertEqual(published[0].header.frame_id,'enu')
