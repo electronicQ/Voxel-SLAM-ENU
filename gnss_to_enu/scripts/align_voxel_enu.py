@@ -172,32 +172,80 @@ def read_pcd_xyz(path):
     return xyz
 
 
-def export_map(scan_dir, poses, rotation, translation, output):
-    # Frame i.pcd stores IMU-frame points; no LiDAR extrinsic is applied here.
+def write_xyz_pcd(path, payload, count):
+    """Write standard binary XYZ without loading a complete map into memory."""
+    import shutil
+    with path.open('wb') as stream:
+        stream.write(('VERSION .7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\n'
+                      'COUNT 1 1 1\nWIDTH %d\nHEIGHT 1\n'
+                      'VIEWPOINT 0 0 0 1 0 0 0\nPOINTS %d\nDATA binary\n' % (count,count)).encode('ascii'))
+        with payload.open('rb') as source:
+            shutil.copyfileobj(source,stream,1024*1024)
+
+
+def export_map(scan_dir, poses, rotation, translation, output, map_voxel_size=.15):
+    """Save full map AND global voxel centroids; disk-backed accumulation spans all frames."""
+    import sqlite3
+    if not np.isfinite(map_voxel_size) or map_voxel_size < 0:
+        raise ValueError('map_voxel_size must be finite and nonnegative')
     paths = [scan_dir/(str(i)+'.pcd') for i in range(len(poses))]
     for path in paths:
         if not path.is_file():
             raise ValueError('Missing frame '+str(path)+'; use complete saved session')
     payload = output/'map_payload.tmp'
-    total = 0
+    reduced_payload = output/'map_downsampled_payload.tmp'
+    database = output/'map_voxels.tmp.sqlite'
+    connection = None
+    total, reduced = 0, None
     try:
+        if map_voxel_size > 0:
+            connection=sqlite3.connect(str(database))
+            connection.execute('PRAGMA journal_mode=OFF')
+            connection.execute('PRAGMA synchronous=OFF')
+            connection.execute('PRAGMA cache_size=-32768')  # ~32 MiB page cache, not whole-map storage.
+            connection.execute('CREATE TABLE voxels (ix INTEGER,iy INTEGER,iz INTEGER,sx REAL,sy REAL,sz REAL,n INTEGER, PRIMARY KEY(ix,iy,iz)) WITHOUT ROWID')
         with payload.open('wb') as stream:
             for path, pose in zip(paths, poses):
                 xyz = read_pcd_xyz(path)
                 rm = quaternion_matrix(pose[4:8])
                 xyz = xyz @ (rotation@rm).T + rotation@pose[1:4] + translation
-                np.asarray(xyz, dtype='<f4').tofile(stream)
-                total += len(xyz)
-        with (output/'map_enu.pcd').open('wb') as stream:
-            stream.write(('VERSION .7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\n'
-                          'COUNT 1 1 1\nWIDTH %d\nHEIGHT 1\n'
-                          'VIEWPOINT 0 0 0 1 0 0 0\nPOINTS %d\nDATA binary\n' % (total,total)).encode('ascii'))
-            with payload.open('rb') as source:
-                import shutil
-                shutil.copyfileobj(source, stream, 1024*1024)
+                # Downsample exactly the coordinates written to the full float32 map.
+                saved = np.asarray(xyz,dtype='<f4')
+                if not np.isfinite(saved).all():
+                    raise ValueError('Nonfinite/overflowing transformed map coordinates in '+str(path))
+                saved.tofile(stream)
+                total += len(saved)
+                if connection is not None and len(saved):
+                    points=saved.astype(np.float64)
+                    cells=np.floor(points/map_voxel_size)
+                    if not np.isfinite(cells).all() or np.any(cells < -(2.**63)) or np.any(cells >= 2.**63):
+                        raise ValueError('Voxel indices exceed int64 range; increase map_voxel_size')
+                    keys,inverse,counts=np.unique(cells.astype(np.int64),axis=0,return_inverse=True,return_counts=True)
+                    sums=np.column_stack([np.bincount(inverse,weights=points[:,j],minlength=len(keys)) for j in range(3)])
+                    # Each frame contributes sums/counts, so final centroids are point-weighted,
+                    # not an average of per-frame centroids or one retained point per frame.
+                    rows=((int(k[0]),int(k[1]),int(k[2]),float(v[0]),float(v[1]),float(v[2]),int(n))
+                          for k,v,n in zip(keys,sums,counts))
+                    connection.executemany('INSERT INTO voxels VALUES (?,?,?,?,?,?,?) '
+                        'ON CONFLICT(ix,iy,iz) DO UPDATE SET sx=sx+excluded.sx,sy=sy+excluded.sy,sz=sz+excluded.sz,n=n+excluded.n',rows)
+                    connection.commit()
+        write_xyz_pcd(output/'map_enu.pcd',payload,total)
+        if connection is not None:
+            reduced=int(connection.execute('SELECT COUNT(*) FROM voxels').fetchone()[0])
+            cursor=connection.execute('SELECT sx/n,sy/n,sz/n FROM voxels ORDER BY ix,iy,iz')
+            with reduced_payload.open('wb') as stream:
+                while True:
+                    batch=cursor.fetchmany(65536)
+                    if not batch:
+                        break
+                    np.asarray(batch,dtype='<f4').tofile(stream)
+            write_xyz_pcd(output/'map_enu_downsampled.pcd',reduced_payload,reduced)
     finally:
-        payload.unlink(missing_ok=True)
-    return total
+        if connection is not None:
+            connection.close()
+        for temporary in (payload,reduced_payload,database):
+            temporary.unlink(missing_ok=True)
+    return total,reduced
 
 
 def trajectory_diagnostics(output, source, target, times, selected, threshold,
@@ -606,6 +654,7 @@ def main(argv=None):
     parser.add_argument('--min-inlier-ratio', type=float, default=.7)
     parser.add_argument('--max-rmse', type=float, default=.3, help='Maximum inlier 3D RMSE; failing produces no export')
     parser.add_argument('--ransac-trials', type=int, default=500)
+    parser.add_argument('--map-voxel-size', type=float, default=.15, help='Global ENU voxel centroid size [m]; 0 disables extra downsampled PCD')
     parser.add_argument('--alignment-only', action='store_true', help='Export alignment diagnostics without reading PCDs')
     parser.add_argument('--auto-time-offset', action='store_true', help='Search time offset separately in automatic candidate windows')
     parser.add_argument('--offset-min', type=float, default=-2.)
@@ -634,6 +683,8 @@ def main(argv=None):
             or (args.offset_max-args.offset_min)/args.offset_step > 200 or args.window_seconds <= 0
             or min(parameters[4:]) < 0 or args.min_motion_ratio >= 1 or args.min_consistent_windows < 2):
         raise ValueError('Invalid automatic selection parameters (<=201 time search grid points)')
+    if not np.isfinite(args.map_voxel_size) or args.map_voxel_size < 0:
+        raise ValueError('map_voxel_size must be finite and nonnegative')
     if args.output.exists():
         raise ValueError('Output already exists; select a new directory')
     poses = read_poses(args.session/'alidarState.txt')
@@ -739,11 +790,16 @@ def main(argv=None):
             stream.write(' '.join(format(float(v), '.9f') for v in [pose[0],*p,*q])+'\n')
     if not args.alignment_only:
         try:
-            report['map_points'] = export_map(args.session, poses, r, t, args.output)
+            report['map_points'],report['downsampled_map_points'] = export_map(
+                args.session,poses,r,t,args.output,args.map_voxel_size)
+            report['map_voxel_size_m'] = args.map_voxel_size
+            report['map_files'] = {'full':'map_enu.pcd',
+                                   'downsampled':'map_enu_downsampled.pcd' if args.map_voxel_size > 0 else None}
             report['status'] = 'complete_with_warnings' if warnings else 'complete'
         except Exception:
             report['status'] = 'map_export_failed'
             (args.output/'map_enu.pcd').unlink(missing_ok=True)
+            (args.output/'map_enu_downsampled.pcd').unlink(missing_ok=True)
             save_report()
             raise
     save_report()
@@ -763,7 +819,7 @@ def run_ros():
     argv.extend(['--lever-arm', *map(str, lever)])
     for name, default in (('time_offset', 0.), ('max_gap', .25), ('sample_distance', 1.),
                           ('inlier_threshold', .5), ('min_pairs', 10),
-                          ('min_inlier_ratio', .7), ('max_rmse', .3), ('ransac_trials', 500),
+                          ('min_inlier_ratio', .7), ('max_rmse', .3), ('ransac_trials', 500), ('map_voxel_size',.15),
                           ('offset_min',-2.),('offset_max',2.),('offset_step',.1),('window_seconds',120.),
                           ('max_xy_variance',.04),('max_z_variance',.25),('min_motion_span',10.),
                           ('min_motion_ratio',.02),('consistency_distance',2.),('consistency_angle',2.),

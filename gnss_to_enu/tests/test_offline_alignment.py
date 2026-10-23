@@ -21,7 +21,7 @@ class AlignmentTests(unittest.TestCase):
     def test_ros_parameter_entrypoint(self):
         params={'~session':'/data/session with spaces', '~rtk':'/data/rtk.csv',
                 '~output':'/data/enu', '~lever_arm':[.1,-.2,.3], '~alignment_only':True,
-                '~sample_distance':2., '~datum':'/data/datum.json'}
+                '~sample_distance':2., '~datum':'/data/datum.json', '~map_voxel_size':0.5}
         ros=SimpleNamespace(init_node=lambda name:None, loginfo=lambda msg:None,
                             get_param=lambda key,*default:params[key] if key in params else default[0])
         with patch.dict('sys.modules', {'rospy':ros}), patch.object(a,'main') as main:
@@ -30,6 +30,7 @@ class AlignmentTests(unittest.TestCase):
             self.assertEqual(argv[argv.index('--session')+1],'/data/session with spaces')
             self.assertEqual(argv[argv.index('--lever-arm')+1:argv.index('--lever-arm')+4],['0.1','-0.2','0.3'])
             self.assertIn('--alignment-only',argv)
+            self.assertEqual(argv[argv.index('--map-voxel-size')+1],'0.5')
             self.assertEqual(argv[argv.index('--sample-distance')+1],'2.0')
             self.assertEqual(argv[argv.index('--datum')+1],'/data/datum.json')
             params['~alignment_only']='false'
@@ -98,6 +99,10 @@ class AlignmentTests(unittest.TestCase):
             trajectory=np.loadtxt(out/'trajectory_enu.tum')
             np.testing.assert_allclose(a.quaternion_matrix(trajectory[10,4:]),r@a.quaternion_matrix(poses[10,4:]),atol=1e-8)
             self.assertIn(json.loads((out/'alignment.json').read_text())['status'],('complete','complete_with_warnings'))
+            self.assertTrue((out/'map_enu_downsampled.pcd').exists())
+            report=json.loads((out/'alignment.json').read_text())
+            self.assertEqual(report['map_voxel_size_m'],.15)
+            self.assertEqual(report['downsampled_map_points'],len(a.read_pcd_xyz(out/'map_enu_downsampled.pcd')))
             self.assertTrue((out/'trajectory_comparison.png').stat().st_size > 10000)
             self.assertIsNotNone(json.loads((out/'diagnostic.json').read_text())['candidate_T_enu_map'])
             with self.assertRaises(ValueError):
@@ -117,6 +122,7 @@ class AlignmentTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 a.main(args)
             self.assertFalse((root/'missing'/'map_enu.pcd').exists())
+            self.assertFalse((root/'missing'/'map_enu_downsampled.pcd').exists())
             self.assertEqual(json.loads((root/'missing'/'alignment.json').read_text())['status'],'map_export_failed')
 
     def test_failure_diagnostics(self):
@@ -164,6 +170,7 @@ class AlignmentTests(unittest.TestCase):
                     self.assertTrue((output/'trajectory_comparison.png').stat().st_size > 10000)
                     report=json.loads((output/'alignment.json').read_text())
                     self.assertFalse((output/'map_enu.pcd').exists())  # alignment-only
+                    self.assertFalse((output/'map_enu_downsampled.pcd').exists())
                     if uncomputable:
                         self.assertEqual(report['status'],'alignment_failed')
                         self.assertIsNone(report['T_enu_map'])
@@ -230,6 +237,45 @@ class AlignmentTests(unittest.TestCase):
             np.testing.assert_array_equal(a.read_quality(p,stamps),[-1,-1,-1])
             p.write_text('timestamp,sol_status,pos_type\n1700000000.000000000,SOL_COMPUTED,NARROW_INT\n1700000001.000000000,SOL_COMPUTED,NARROW_FLOAT\n')
             np.testing.assert_array_equal(a.read_quality(p,stamps),[1,0,-1])
+
+    def test_global_voxel_centroids_across_frames_and_negative_coordinates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);session=root/'session';session.mkdir();out=root/'out';out.mkdir()
+            clouds=[np.array([[.1,.1,.1],[.3,.1,.1],[1.1,.1,.1]]),
+                    np.array([[.1,.1,.1],[.1,.1,.1],[.1,.1,.1],[.3,.1,.1],[1.1,.1,.1]])]
+            for i,cloud in enumerate(clouds):
+                raw=root/('raw'+str(i))
+                cloud.astype('<f4').tofile(raw)
+                a.write_xyz_pcd(session/(str(i)+'.pcd'),raw,len(cloud))
+            poses=np.array([[1.,0,0,0,0,0,0,1],[2.,.05,0,0,0,0,0,1]])
+            rotation=np.array([[0.,-1,0],[1,0,0],[0,0,1]])
+            translation=np.array([0.,-.2,0.])
+            count,reduced=a.export_map(session,poses,rotation,translation,out,.5)
+            self.assertEqual((count,reduced),(8,3))
+            full=a.read_pcd_xyz(out/'map_enu.pcd')
+            expected_full=np.vstack([clouds[0],clouds[1]+[.05,0,0]])@rotation.T+translation
+            np.testing.assert_allclose(full,expected_full,atol=1e-7)
+            sparse=a.read_pcd_xyz(out/'map_enu_downsampled.pcd')
+            # All frames combined, point-weighted centroid. Negative voxel uses floor.
+            np.testing.assert_allclose(sparse,[[-.1,-.0625,.1],[-.1,.125,.1],[-.1,.925,.1]],atol=1e-7)
+            self.assertFalse(list(out.glob('*.tmp*')))
+            disabled=root/'disabled';disabled.mkdir()
+            self.assertEqual(a.export_map(session,poses,rotation,translation,disabled,0),(8,None))
+            self.assertFalse((disabled/'map_enu_downsampled.pcd').exists())
+            np.testing.assert_array_equal(a.read_pcd_xyz(disabled/'map_enu.pcd'),full)
+            with self.assertRaises(ValueError):a.export_map(session,poses,rotation,translation,out,-1)
+
+    def test_voxel_export_failure_cleans_temporary_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);session=root/'session';session.mkdir();out=root/'out';out.mkdir()
+            raw=root/'raw';np.array([[1.,2.,3.]],dtype='<f4').tofile(raw)
+            a.write_xyz_pcd(session/'0.pcd',raw,1)
+            (session/'1.pcd').write_text('broken PCD')
+            poses=np.array([[1.,0,0,0,0,0,0,1],[2.,0,0,0,0,0,0,1]])
+            with self.assertRaises(ValueError):
+                a.export_map(session,poses,np.eye(3),np.zeros(3),out,.2)
+            self.assertFalse(list(out.glob('*.tmp*')))
+            self.assertFalse((out/'map_enu.pcd').exists())
 
     def test_binary_padding_ascii_and_truncation(self):
         with tempfile.TemporaryDirectory() as tmp:

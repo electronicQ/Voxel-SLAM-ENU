@@ -28,6 +28,13 @@
   <!-- true：只输出配准结果和诊断，不读取 PCD；false：继续导出 ENU 地图。 -->
   <arg name="alignment_only" default="false" />
 
+  <!-- 合并后的 ENU 地图体素降采样尺寸 [m]，不是拟合轨迹的 sample_distance。
+       默认 0.15 m：保留完整 map_enu.pcd，同时保存 map_enu_downsampled.pcd。
+       越大点越少、地图更稀疏、细节更少；越小细节更多、文件通常更大；0 关闭额外降采样文件。
+       对全局 ENU 体素累计所有帧的点并取质心，避免重叠帧重复占用同一体素。
+       alignment_only=true 时两种地图均不生成；完整地图不会被降采样结果覆盖。 -->
+  <arg name="map_voxel_size" default="0.15" />
+
   <!-- RTK 与地图轨迹的固定时间偏移，单位 s，可正可负。
        对应关系：t_map = t_RTK + time_offset。
        增大表示同一 RTK 点匹配更晚的 SLAM 位姿，减小表示匹配更早的位姿。
@@ -133,6 +140,7 @@
     <param name="datum" value="$(arg datum)" type="str" />
     <rosparam param="lever_arm" subst_value="true">[$(arg lever_x), $(arg lever_y), $(arg lever_z)]</rosparam>
     <param name="alignment_only" value="$(arg alignment_only)" type="bool" />
+    <param name="map_voxel_size" value="$(arg map_voxel_size)" type="double" />
     <param name="time_offset" value="$(arg time_offset)" type="double" />
     <param name="auto_time_offset" value="$(arg auto_time_offset)" type="bool" />
     <param name="offset_min" value="$(arg offset_min)" type="double" />

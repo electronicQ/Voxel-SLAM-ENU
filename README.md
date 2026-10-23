@@ -151,13 +151,23 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 **有可计算的刚体变换时，质量门限只报警，不阻止 ENU 地图导出**。没有可信片段时会尝试备用解，并明确标为不可信。
 若点数/几何退化导致完全无法计算变换，或输入文件缺失、输出不可写，则报错，不生成假地图。
 工具不进行尺度缩放、不使用 ICP 最近邻配对，也不会重复施加 LiDAR 外参。
+导出默认同时保存完整地图和体素降采样地图。可设置：
+
+```bash
+roslaunch gnss_to_enu align_voxel_enu.launch map_voxel_size:=0.15
+```
+
+`map_voxel_size` 单位米，越大地图越稀疏、细节越少，越小保留细节越多；0 表示仅保存完整地图。
+该参数只作用于合并转换后的 ENU 点云，不影响轨迹配准或原始逐帧 PCD。
+`alignment_only:=true` 时两张地图均不导出。
 参数门限、时间偏移符号及完整用法见 [ENU 工具说明](gnss_to_enu/README.md)。
 
 ## 输出文件
 
 | 文件 | 内容 |
 |---|---|
-| `map_enu.pcd` | ENU 点云地图，binary XYZ |
+| `map_enu.pcd` | 完整 ENU 点云地图，binary XYZ |
+| `map_enu_downsampled.pcd` | 全局体素质心降采样后的 ENU 地图，默认体素 0.15 m |
 | `trajectory_enu.tum` | ENU 下的最终 IMU 位姿轨迹 |
 | `T_enu_map.txt` | 4×4 变换，`p_enu = R_enu_map * p_map + t_enu_map` |
 | `alignment.json` | 原点、变换、自动选中窗口、实际时间偏差、质量是否达标、告警及导出状态 |
@@ -194,8 +204,8 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
 python3 -m unittest discover -s gnss_to_enu/tests -v
 ```
 
-已通过 10 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建，自动/手动原点记录及 ROS 参数入口映射。
-已检查 Python 语法和 launch XML，并已在 ROS1 环境测试通过。新增自动选段、时间搜索、解状态记录和报警导出逻辑已通过合成测试；本次驱动 C++ 改动及新流程尚待 ROS1 编译、回放验证。
+已通过 12 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建，自动/手动原点记录及 ROS 参数入口映射。
+已检查 Python 语法和 launch XML，并已在 ROS1 环境测试通过。新增自动选段、时间搜索、解状态记录、报警导出及全局体素降采样已通过合成测试；本次驱动 C++ 改动及新流程尚待 ROS1 编译、回放验证。
 
 ## 上游与许可证
 

@@ -243,6 +243,29 @@ timestamp,sol_status,pos_type
 新采集可录制该话题，或建图时让记录节点直接监听；旧 bag 不会凭空获得过去未记录的解状态。
 **本次涉及北云 C++ 驱动更新，ROS1 部署后需重新 `catkin_make`。**
 
+### 完整地图与降采样地图双输出
+
+默认一次运行保存两份地图，不覆盖原始逐帧 PCD：
+
+```bash
+roslaunch gnss_to_enu align_voxel_enu.launch map_voxel_size:=0.15
+```
+
+`map_voxel_size` 是 ENU 体素边长，单位 m；默认 0.15，越大通常点越少、文件越小、细节越少，
+越小保留更多点和细节。设为 0 时关闭额外降采样文件，仍保存完整 `map_enu.pcd`。
+Python CLI 对应 `--map-voxel-size 0.15`。这与拟合轨迹用的 `sample_distance` 无关。
+`alignment_only=true` 时不读取点云，两份地图均不生成。
+
+每帧点先用最终保存的 IMU 位姿和地图→ENU 变换得到 ENU 坐标，再累计到统一全局网格。
+所有帧落入同一体素的点只产生一个质心，按点数加权，不是先逐帧降采样后直接拼接，
+也不是对每帧质心简单平均。负坐标同样按 floor 划分网格。
+降采样使用写入完整 float32 地图的坐标；完整地图内容和点数不因降采样改变。
+
+实现只依赖 Python 标准库 SQLite 和已有 NumPy，按帧累计到磁盘临时数据库，避免把完整地图一次性加载进内存；
+大地图需预留临时磁盘空间，导出耗时会增加。完成或失败后清理临时数据。
+`alignment.json` 新增 `map_voxel_size_m`、`map_points`、`downsampled_map_points` 和 `map_files`，分别记录体素大小、
+完整/降采样点数和文件名；关闭降采样时降采样点数及路径为 null。
+
 ## 5. 输出与验收
 
 - `alignment.json`：原点、T_enu_map、杆臂、时间偏移、门限、误差统计和导出状态。
@@ -254,11 +277,12 @@ timestamp,sol_status,pos_type
 - `matched_pairs.csv`：全部匹配天线点、三轴方差、采用窗口/质量标记及 `rtk_fixed`（1=固定、0=已知非固定、-1=未知）。
 - `auto_windows.json`：所有候选窗口的运动范围、误差、时间偏差及一致性支持数量。
 - `automatic_selection.png`：候选窗口的误差/时间偏差图，星号表示采用窗口。
-- `map_enu.pcd`：ENU 地图，binary XYZ float32；原保存格式没有可靠强度，本工具不输出 intensity。
+- `map_enu.pcd`：完整 ENU 地图，binary XYZ float32；原保存格式没有可靠强度，本工具不输出 intensity。
+- `map_enu_downsampled.pcd`：完整地图在 ENU 全局体素网格中的质心降采样结果，默认体素 0.15 m。
 
 完整成功的 `alignment.json.status` 为 `complete`，有警告但成功导出为 `complete_with_warnings`；
 只对齐为 `alignment_validated` 或 `alignment_with_warnings`；
-PCD 导出失败为 `map_export_failed`，不会留下半张 map_enu.pcd。
+PCD 导出失败为 `map_export_failed`，不会留下不完整的 map_enu.pcd 或 map_enu_downsampled.pcd。
 仅完全无法计算非退化变换时为 `alignment_failed`，`T_enu_map` 为 null，保留能生成的诊断。
 `quality_passed` 与导出状态独立，所有未达标项目写入 `warnings` 并在终端输出。
 
