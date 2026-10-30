@@ -1,7 +1,6 @@
 """Converter contract checks using minimal ROS message mocks (ROS1 not required)."""
 import csv
 import importlib.util
-import json
 from pathlib import Path
 import sys
 import tempfile
@@ -49,7 +48,7 @@ class RecordingTests(unittest.TestCase):
                              header=S(stamp=S(to_sec=lambda:t)),status=S(status=0),
                              position_covariance=[.0004,0,0,0,.0004,0,0,0,.0016],position_covariance_type=2)
                 if auto:
-                    self.assertFalse((Path(tmp)/'datum.json').exists())
+                    self.assertFalse((Path(tmp)/'map_enu.meta.yaml').exists())
                     invalid_first=fix(1699999999.)
                     invalid_first.status.status=-1
                     node.gnss_cb(invalid_first)
@@ -74,11 +73,12 @@ class RecordingTests(unittest.TestCase):
                 self.assertAlmostEqual(float(rows[0]['var_u']),.0016)
                 np.testing.assert_allclose([float(rows[0][k]) for k in ('east','north','up')],0.,atol=1e-8)
                 self.assertGreater(float(rows[1]['east']),0.)
-                datum=json.loads((Path(tmp)/'datum.json').read_text())
-                self.assertEqual(datum['latitude'],22.)
-                self.assertEqual(datum['longitude'],113.)
-                self.assertEqual(datum['altitude'],10.)
-                self.assertEqual(datum['use_auto_datum'],auto)
+                self.assertEqual(
+                    (Path(tmp)/'map_enu.meta.yaml').read_text(),
+                    'enu_origin:\n'
+                    '  latitude: 22.00000000\n'
+                    '  longitude: 113.00000000\n'
+                    '  altitude: 10.00000000\n')
                 with self.assertRaises(RuntimeError): module.GNSSToENU()
 
 

@@ -210,6 +210,7 @@ include_directories(
 
 # Offline alignment has no ROS runtime dependency; install beside the converter.
 catkin_install_python(PROGRAMS
+  scripts/run_flight.py
   scripts/gnss_to_enu.py
   scripts/align_voxel_enu.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

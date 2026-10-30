@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 
 # Editor and office temporary files
+.vscode/
 .~*
 ~$*
 *.swp

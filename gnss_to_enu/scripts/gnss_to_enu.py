@@ -4,12 +4,13 @@
 import rospy
 import math
 import csv
-import json
 from pathlib import Path
 import numpy as np
 from sensor_msgs.msg import NavSatFix
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
+
+ENU_META_FILENAME = 'map_enu.meta.yaml'
 
 class GNSSToENU:
     def __init__(self):
@@ -35,8 +36,11 @@ class GNSSToENU:
         if self.record_dir:
             directory = Path(self.record_dir).expanduser()
             directory.mkdir(parents=True, exist_ok=True)
-            if (directory / 'datum.json').exists():
-                raise RuntimeError('Recording directory already contains datum.json; use a new run directory')
+            if ((directory / ENU_META_FILENAME).exists()
+                    or (directory / 'datum.json').exists()):
+                raise RuntimeError(
+                    'Recording directory already contains ENU origin metadata; '
+                    'use a new run directory')
             self.record_file = (directory / 'rtk_enu.csv').open('x', newline='')
             self.csv_writer = csv.writer(self.record_file)
             self.csv_writer.writerow(['timestamp', 'east', 'north', 'up', 'var_e', 'var_n', 'var_u',
@@ -130,14 +134,18 @@ class GNSSToENU:
 
     def save_datum(self):
         if self.record_dir:
-            metadata = {'latitude': self.origin_lat, 'longitude': self.origin_lon,
-                        'altitude': self.origin_alt, 'altitude_reference': self.altitude_reference,
-                        'frame_id': self.enu_frame, 'use_auto_datum': self.use_auto_datum,
-                        'coordinate_conversion': 'WGS84 LLA -> ECEF -> datum ENU',
-                        'covariance': 'NavSatFix ENU diagonal, recorded without Z inflation'}
-            path = Path(self.record_dir).expanduser() / 'datum.json'
+            values = np.asarray(
+                [self.origin_lat, self.origin_lon, self.origin_alt],
+                dtype=float)
+            if not np.isfinite(values).all():
+                raise ValueError('ENU origin latitude/longitude/altitude must be finite')
+            path = Path(self.record_dir).expanduser() / ENU_META_FILENAME
             with path.open('x') as stream:
-                json.dump(metadata, stream, indent=2, allow_nan=False)
+                stream.write(
+                    'enu_origin:\n'
+                    f'  latitude: {self.origin_lat:.8f}\n'
+                    f'  longitude: {self.origin_lon:.8f}\n'
+                    f'  altitude: {self.origin_alt:.8f}\n')
 
     # WGS84 经纬高转 ECEF 地心坐标系
     def lla_to_ecef(self, lat, lon, alt):

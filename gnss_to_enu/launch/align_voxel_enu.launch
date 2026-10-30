@@ -12,6 +12,9 @@
   <!-- 输出目录，必须是尚不存在的新目录。 -->
   <arg name="output" default="$(env HOME)/voxel_enu_data/enu_flight01" />
 
+  <!-- 下游使用目录：只发布降采样地图和紧凑 ENU 原点 YAML，覆盖为最近一次成功导出。 -->
+  <arg name="publish_dir" default="$(env HOME)/voxel_enu_data/output" />
+
   <!-- IMU 原点指向 GNSS 天线参考点的杆臂，表达在 IMU 系，单位 m。
        天线在 LiDAR 系 [-0.35, 0.05, 0.1]，Avia R_IL=I，
        t_IL=[0.04165, 0.02326, -0.0284]；lever_I=R_IL*antenna_L+t_IL。
@@ -22,7 +25,7 @@
 
   <arg name="lever_z" default="0.07160" />
 
-  <!-- ENU 原点元数据路径；留空使用 RTK CSV 同目录的 datum.json。 -->
+  <!-- ENU 原点元数据路径；留空使用 RTK CSV 同目录的 map_enu.meta.yaml。 -->
   <arg name="datum" default="" />
 
   <!-- true：只输出配准结果和诊断，不读取 PCD；false：继续导出 ENU 地图。 -->
@@ -137,6 +140,7 @@
     <param name="session" value="$(arg session)" type="str" />
     <param name="rtk" value="$(arg rtk)" type="str" />
     <param name="output" value="$(arg output)" type="str" />
+    <param name="publish_dir" value="$(arg publish_dir)" type="str" />
     <param name="datum" value="$(arg datum)" type="str" />
     <rosparam param="lever_arm" subst_value="true">[$(arg lever_x), $(arg lever_y), $(arg lever_z)]</rosparam>
     <param name="alignment_only" value="$(arg alignment_only)" type="bool" />

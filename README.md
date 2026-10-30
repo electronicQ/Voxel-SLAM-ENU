@@ -61,7 +61,70 @@ source devel/setup.bash
 
 ## 建图与导出
 
-### 1. 检查传感器和时间基准
+### 方式1：一键采集脚本
+
+[run_flight.py](gnss_to_enu/scripts/run_flight.py) 会启动两个传感器、检查 LiDAR/RTK 话题、
+开始建图，并在按 Ctrl+C 时发送 `/save_only`。脚本只在看到 `Final trajectory written:`、
+有效轨迹、逐帧 PCD 和 RTK CSV 后才停止建图，随后自动执行 ENU 对齐导出并清理传感器进程。
+
+先 source 工作空间，再运行：
+
+```bash
+source devel/setup.bash
+python3 src/gnss_to_enu/scripts/run_flight.py --run-id flight01
+```
+
+如果脚本不在当前工作空间，或者没有自动找到 ROS 环境，显式传入环境脚本：
+
+```bash
+python3 /ABS/PATH/TO/gnss_to_enu/scripts/run_flight.py \
+  --setup /ABS/PATH/TO/voxel_enu_ws/devel/setup.bash \
+  --run-id flight_20261029_150000 \
+  --data-root "$HOME/voxel_enu_data"
+```
+
+常用参数：
+
+```text
+--run-id ID                 本次任务名；默认使用时间生成
+--startup-delay 30          两个传感器启动后的等待秒数
+--config /ABS/config.yaml   指定 LiDAR 配置
+--manual-datum LAT LON ALT  手动 ENU 原点；默认自动取第一条有效 RTK
+--lever-arm X Y Z           IMU 到 GNSS 天线杆臂；默认使用 launch 配置
+--map-voxel-size 0.15       ENU 降采样体素尺寸
+--save-mode finish          Ctrl+C 后先执行最终全局 BA；默认 save_only
+--no-sensors                复用已经启动的传感器 drivers
+--no-rviz                   不启动建图 RViz
+--skip-topic-check          跳过传感器话题首条消息检查
+--dry-run                   只打印路径和命令，不执行
+```
+
+同一 `--run-id` 不能重复使用。脚本会同时检查建图 session、RTK 记录、ENU 输出和日志目录，
+发现任一已存在时在启动传感器前直接报错。传感器日志、建图与对齐日志都写入
+`$data_root/logs/<run-id>/`。
+
+每次成功导出后，最近一次的交付文件会汇总到 `$data_root/output/`：
+
+```text
+~/voxel_enu_data/output/
+├── map_enu_downsampled.pcd
+└── map_enu.meta.yaml
+```
+
+`map_enu.meta.yaml` 采用下游路径规划工具格式，只保存原点：
+
+```yaml
+enu_origin:
+  latitude: 22.39758935
+  longitude: 113.30942461
+  altitude: 25.86180000
+```
+
+完整地图、轨迹、残差和对齐报告仍保留在对应的 `$data_root/enu_<run-id>/` 中。
+
+### 方式2：手动逐步执行
+
+### 1） 检查传感器和时间基准
 
 根据实际雷达修改配置文件里的话题、外参、逐点时间等参数。
 LiDAR、IMU、RTK 的测量时间戳必须处于同一时间基准；本项目不会自动完成硬同步。
@@ -70,7 +133,7 @@ RTK 输入默认为 `/rtk/navsatfix`（`sensor_msgs/NavSatFix`）。
 旧 bag/其他驱动没有该话题时仍可运行，但固定解状态标记为 unknown，不会根据 NavSatStatus 猜测。
 本次修改了北云 C++ 驱动，部署更新后请执行 `catkin_make`。如需使用本仓库北云驱动，先按 [驱动说明](sensors/beiyun_gnss/README.md)设置串口及时间戳来源。
 
-### 2. 建图并记录 RTK
+### 2） 建图并记录 RTK
 
 以下命令使用 Livox Avia 示例配置；换雷达时通过 `config:=/绝对路径/配置.yaml` 指定正确配置。
 每次运行使用新的 session 名称和 RTK 目录：
@@ -88,7 +151,8 @@ roslaunch gnss_to_enu avia_mapping_record_rtk.launch \
 此 launch 启动 Voxel-SLAM、RTK 转换记录节点及 RViz，启用地图保存；不会启动传感器驱动。
 `save_path` 需为已存在的父目录并以 `/` 结尾。由于原工程的目录创建实现，请使用不含空格或 shell 特殊字符的路径。
 
-默认 `use_auto_datum=true`，第一条有效 GNSS 的 ENU 位置为 `(0,0,0)`，其经纬高自动保存到 `datum.json`。
+默认 `use_auto_datum=true`，第一条有效 GNSS 的 ENU 位置为 `(0,0,0)`，
+其经纬高自动保存到 `map_enu.meta.yaml`。
 若需要固定原点，额外传入：
 
 ```text
@@ -102,11 +166,11 @@ use_auto_datum:=false datum_lat:=LAT_DEG datum_lon:=LON_DEG datum_alt:=HEIGHT_M
 rosbag play --clock /ABS/PATH/TO/flight01.bag
 ```
 
-### 3. 结束建图并保存
+### 3） 结束建图并保存
 
 数据播放及积压处理完成后，在另一终端选择以下一种方式。
 
-**只保存当前结果，跳过结束阶段的全局 BA：**
+**只保存当前结果，跳过结束阶段的全局 BA (推荐)：**
 
 ```bash
 rosparam set /save_only true
@@ -128,9 +192,9 @@ rosparam set /finish true
 这里的地图保存是逐帧 PCD 加对应轨迹；合并后的 ENU 地图仍由下一步离线工具导出。
 
 最终轨迹位于 `maps/flight01/alidarState.txt`；同目录 `0.pcd`、`1.pcd` 等保存对应的 IMU 系点云。
-RTK 目录保存 `rtk_enu.csv` 与 `datum.json`。
+RTK 目录保存 `rtk_enu.csv` 与 `map_enu.meta.yaml`。
 
-### 4. 对齐并导出
+### 4） 对齐并导出
 
 推荐使用 [align_voxel_enu.launch](gnss_to_enu/launch/align_voxel_enu.launch)，将路径、杆臂和门限保存在 launch 顶部的 `arg default` 中。
 默认路径使用 `$HOME/voxel_enu_data`，默认 IMU→天线杆臂为 `[-0.30835, 0.07326, 0.07160]` m，
@@ -139,8 +203,7 @@ RTK 目录保存 `rtk_enu.csv` 与 `datum.json`。
 不需要 GNSS 旋转外参；不要将 LiDAR→IMU 平移直接当作 GNSS 杆臂。
 
 ```bash
-roslaunch gnss_to_enu align_voxel_enu.launch \
-  lever_x:=LX lever_y:=LY lever_z:=LZ
+roslaunch gnss_to_enu align_voxel_enu.launch
 ```
 
 修改好 launch 默认值后，也可直接运行 `roslaunch gnss_to_enu align_voxel_enu.launch`。
@@ -162,24 +225,181 @@ roslaunch gnss_to_enu align_voxel_enu.launch map_voxel_size:=0.15
 `alignment_only:=true` 时两张地图均不导出。
 参数门限、时间偏移符号及完整用法见 [ENU 工具说明](gnss_to_enu/README.md)。
 
-## 输出文件
+## 输出文件及路径
+
+### 默认输出根目录
+
+一键脚本 `run_flight.py` 默认使用：
+
+```text
+$HOME/voxel_enu_data
+```
+
+当前用户 `gzq` 对应的绝对路径是：
+
+```text
+/home/gzq/voxel_enu_data
+```
+
+这里不是文件系统根目录下的 `/voxel_enu_data`。`$HOME` 是当前登录用户的主目录；
+如果在无人机工控机上以其他用户登录，路径会随之变化，例如 `/home/ubuntu/voxel_enu_data`。
+
+可通过脚本参数修改根目录：
+
+```bash
+--data-root /data/flight_data
+```
+
+此时下面所有默认目录都会创建在 `/data/flight_data` 下。手动的 `roslaunch` 命令可以直接覆盖
+`save_path`、`record_dir`、`output` 和 `publish_dir`，此时以命令参数实际指定的路径为准。
+
+### 完整目录结构
+
+以 `--run-id flight01` 为例，默认目录结构为：
+
+```text
+~/voxel_enu_data/
+├── output/                              # 最近一次成功导出的交付文件
+│   ├── map_enu_downsampled.pcd
+│   └── map_enu.meta.yaml
+├── maps/
+│   ├── edge.txt                         # 回环/PGO 边，保存时生成
+│   └── flight01/                        # Voxel-SLAM 建图 session
+│       ├── alidarState.txt              # 最终轨迹和状态
+│       ├── 0.pcd                        # 第 0 帧 IMU 系点云
+│       ├── 1.pcd                        # 第 1 帧 IMU 系点云
+│       └── ...                          # 后续逐帧 PCD
+├── rtk_flight01/                        # RTK 原始记录和 ENU 原点
+│   ├── rtk_enu.csv
+│   ├── rtk_quality.csv
+│   └── map_enu.meta.yaml
+├── enu_flight01/                        # 该次运行的完整 ENU 对齐结果
+│   ├── map_enu.pcd
+│   ├── map_enu_downsampled.pcd
+│   ├── trajectory_enu.tum
+│   ├── T_enu_map.txt
+│   ├── alignment.json
+│   ├── residuals.csv
+│   ├── matched_pairs.csv
+│   ├── trajectory_comparison.png
+│   ├── automatic_selection.png
+│   ├── auto_windows.json
+│   └── diagnostic.json
+└── logs/
+    └── flight01/
+        ├── run_info.json
+        ├── lidar.launch.log
+        ├── gnss.launch.log
+        ├── mapping.launch.log
+        └── alignment.launch.log
+```
+
+`<run-id>` 默认由时间自动生成，例如 `flight_20261030_153000`。Voxel-SLAM session、
+RTK 目录和详细 ENU 输出目录都要求是该次运行的新目录；`output/` 是固定交付目录，
+每次成功导出后会替换为最近一次运行的两个交付文件。
+
+### output：下游直接使用
+
+路径：
+
+```text
+<data-root>/output/
+```
+
+| 文件 | 内容 | 生成条件 |
+|---|---|---|
+| `map_enu_downsampled.pcd` | ENU 坐标系下的全局体素质心降采样点云，binary XYZ float32 | `map_voxel_size > 0` 且地图导出成功 |
+| `map_enu.meta.yaml` | ENU 原点经纬高，供下游路径规划工具读取 | 对齐和发布成功 |
+
+`map_enu.meta.yaml` 内容固定为：
+
+```yaml
+enu_origin:
+  latitude: 22.39758935
+  longitude: 113.30942461
+  altitude: 25.86180000
+```
+
+经纬高均为 WGS84 椭球高，默认使用本次飞行第一条通过质量检查的 RTK 测量作为 ENU 原点。
+
+### maps：Voxel-SLAM 建图原始数据
+
+路径：
+
+```text
+<data-root>/maps/<run-id>/
+```
 
 | 文件 | 内容 |
 |---|---|
-| `map_enu.pcd` | 完整 ENU 点云地图，binary XYZ |
-| `map_enu_downsampled.pcd` | 全局体素质心降采样后的 ENU 地图，默认体素 0.15 m |
-| `trajectory_enu.tum` | ENU 下的最终 IMU 位姿轨迹 |
-| `T_enu_map.txt` | 4×4 变换，`p_enu = R_enu_map * p_map + t_enu_map` |
-| `alignment.json` | 原点、变换、自动选中窗口、实际时间偏差、质量是否达标、告警及导出状态 |
-| `residuals.csv` | 全部匹配点的三轴及三维残差（存在候选变换时） |
-| `trajectory_comparison.png` | 无论配准通过或失败均输出的轨迹对比图 |
-| `diagnostic.json` | 图片所用变换的来源、是否通过验收及失败原因 |
-| `matched_pairs.csv` | 全部匹配点、三轴方差、自动选段标记及 fixed/float/unknown 标记 |
-| `auto_windows.json` | 各候选窗口的运动范围、误差、估计时间偏差及一致性支持数量 |
-| `automatic_selection.png` | 候选窗口质量/时间偏差图，星号标出采用窗口 |
+| `alidarState.txt` | 最终保存轨迹。每行至少包含时间戳、位置 `px py pz`、姿态四元数 `qx qy qz qw`，后面还包含速度、IMU 偏置、重力等状态字段 |
+| `0.pcd`、`1.pcd`、... | 每个保存 ScanPose 对应一帧 IMU 系点云，第 `i` 行轨迹对应 `i.pcd` |
 
-完整导出无警告时 `alignment.json.status=complete`；有警告但导出成功为 `complete_with_warnings`。
-`quality_passed` 独立表示质量检查是否通过，不能仅凭地图文件存在来判断精度。
+同级的 `maps/edge.txt` 保存回环/PGO 边。它是多次 session 关联用的内部文件，
+不是下游路径规划所需的 ENU 地图。
+
+### rtk_<run-id>：RTK 记录和原点
+
+路径：
+
+```text
+<data-root>/rtk_<run-id>/
+```
+
+| 文件 | 内容 |
+|---|---|
+| `rtk_enu.csv` | 有效 RTK 测量；列为时间戳、ENU 东/北/天位置、三轴方差、NavSatStatus 和协方差类型 |
+| `rtk_quality.csv` | RTK 解状态旁路记录；列为测量时间戳、`sol_status` 和 `pos_type`，例如 `NARROW_INT`、`NARROW_FLOAT` |
+| `map_enu.meta.yaml` | 自动或手动确定的 ENU 原点经纬高 |
+
+`rtk_quality.csv` 可能只有表头，这取决于上游驱动是否发布 `/rtk/solution_quality`。
+`rtk_enu.csv` 只记录通过时间、经纬高、协方差质量门限的测量。
+
+### enu_<run-id>：完整 ENU 对齐结果
+
+路径：
+
+```text
+<data-root>/enu_<run-id>/
+```
+
+| 文件 | 内容 |
+|---|---|
+| `map_enu.pcd` | 完整 ENU 点云地图，binary XYZ float32 |
+| `map_enu_downsampled.pcd` | 全局体素质心降采样 ENU 地图，默认体素 0.15 m |
+| `trajectory_enu.tum` | ENU 下的最终 IMU 位姿轨迹，保持原始时间戳和帧顺序 |
+| `T_enu_map.txt` | 4×4 刚体变换，关系为 `p_enu = R_enu_map * p_map + t_enu_map` |
+| `alignment.json` | 原点、杆臂、时间偏移、变换、选中窗口、质量门限、误差指标、告警和导出状态 |
+| `residuals.csv` | 全部匹配点的三轴残差、三维残差、拟合样本标记和内点标记；存在候选变换时生成 |
+| `matched_pairs.csv` | 全部时间匹配点、SLAM/RTK 坐标、方差、窗口标记、质量标记和 `rtk_fixed` 状态 |
+| `trajectory_comparison.png` | SLAM 与 RTK 的轨迹、高度和残差对比图 |
+| `automatic_selection.png` | 自动选段结果，显示各候选窗口误差及估计时间偏移 |
+| `auto_windows.json` | 全部候选窗口的时间范围、运动范围、误差、偏移和一致性支持数量 |
+| `diagnostic.json` | 诊断图采用的候选变换、来源、验收状态和失败原因 |
+
+当 `alignment_only:=true` 时不导出地图，因此不会生成 `map_enu.pcd` 和
+`map_enu_downsampled.pcd`。如果配准完全失败，部分轨迹或诊断文件仍可能生成，
+但不会用单位矩阵伪造 ENU 地图。
+
+完整导出无警告时 `alignment.json.status=complete`；有警告但成功导出为
+`complete_with_warnings`。`quality_passed` 独立表示质量检查是否通过，
+不能仅凭 ENU 地图文件存在来判断精度。
+
+### logs：一键脚本运行日志
+
+路径：
+
+```text
+<data-root>/logs/<run-id>/
+```
+
+| 文件 | 内容 |
+|---|---|
+| `run_info.json` | 本次 run-id、数据根目录、session/RTK/ENU 输出路径、发布路径、保存模式和时间 |
+| `lidar.launch.log` | Livox LiDAR 驱动启动与运行日志 |
+| `gnss.launch.log` | 北云 GNSS 驱动启动与运行日志 |
+| `mapping.launch.log` | Voxel-SLAM、RTK 记录节点、保存过程和 `Final trajectory written` 日志 |
+| `alignment.launch.log` | 离线对齐、地图导出和发布过程的终端输出 |
 
 运行对齐后，直接查看输出目录中的 `trajectory_comparison.png`：
 
@@ -204,7 +424,7 @@ roslaunch gnss_to_enu align_voxel_enu.launch map_voxel_size:=0.15
 python3 -m unittest discover -s gnss_to_enu/tests -v
 ```
 
-已通过 12 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建，自动/手动原点记录及 ROS 参数入口映射。
+已通过 17 项自动测试，覆盖时间插值、杆臂补偿、已知刚体变换恢复、异常点、退化轨迹、PCD 重建、ENU 原点 YAML、交付目录发布、一键脚本 Ctrl+C 状态转换及 ROS 参数入口映射。
 已检查 Python 语法和 launch XML，并已在 ROS1 环境测试通过。新增自动选段、时间搜索、解状态记录、报警导出及全局体素降采样已通过合成测试；本次驱动 C++ 改动及新流程尚待 ROS1 编译、回放验证。
 
 ## 上游与许可证

@@ -3,9 +3,71 @@
 import argparse
 import csv
 import json
+import os
 from pathlib import Path
+import shutil
 import sys
 import numpy as np
+
+ENU_META_FILENAME = 'map_enu.meta.yaml'
+
+
+def read_enu_origin(path):
+    """Read the compact enu_origin YAML; accept explicit legacy JSON files."""
+    path = Path(path)
+    if path.suffix.lower() == '.json':
+        data = json.loads(path.read_text())
+        data = data.get('enu_origin', data)
+    else:
+        data = {}
+        in_origin = False
+        for raw_line in path.read_text().splitlines():
+            line = raw_line.split('#', 1)[0].rstrip()
+            if not line.strip():
+                continue
+            if not line.startswith((' ', '\t')):
+                in_origin = line.strip() == 'enu_origin:'
+                continue
+            if in_origin and ':' in line:
+                key, value = line.strip().split(':', 1)
+                if key in ('latitude', 'longitude', 'altitude'):
+                    data[key] = value.strip().strip("'\"")
+    missing = [key for key in ('latitude', 'longitude', 'altitude') if key not in data]
+    if missing:
+        raise ValueError('ENU origin metadata missing: '+', '.join(missing))
+    origin = {key: float(data[key]) for key in ('latitude', 'longitude', 'altitude')}
+    if not np.isfinite(list(origin.values())).all():
+        raise ValueError('Invalid ENU origin metadata')
+    return origin
+
+
+def atomic_copy(source, destination):
+    """Publish one file without exposing a partially copied destination."""
+    source, destination = Path(source), Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name('.'+destination.name+'.tmp')
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def publish_outputs(output, datum_path, publish_dir):
+    """Expose only the deliverables needed by the downstream map loader."""
+    output, datum_path, publish_dir = Path(output), Path(datum_path), Path(publish_dir)
+    downsampled = output/'map_enu_downsampled.pcd'
+    if not downsampled.is_file() or downsampled.stat().st_size == 0:
+        raise ValueError('Published output requires a nonempty map_enu_downsampled.pcd; use map_voxel_size > 0')
+    if not datum_path.is_file() or datum_path.stat().st_size == 0:
+        raise ValueError('ENU origin metadata is missing: '+str(datum_path))
+    published_map = publish_dir/'map_enu_downsampled.pcd'
+    published_meta = publish_dir/ENU_META_FILENAME
+    atomic_copy(downsampled, published_map)
+    atomic_copy(datum_path, published_meta)
+    return {'directory':str(publish_dir.resolve()),
+            'downsampled_map':str(published_map.resolve()),
+            'enu_origin':str(published_meta.resolve())}
 
 
 def quaternion_matrix(q):
@@ -643,8 +705,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--session', required=True, type=Path, help='Voxel-SLAM session directory with alidarState.txt and i.pcd')
     parser.add_argument('--rtk', required=True, type=Path, help='rtk_enu.csv recorded by gnss_to_enu')
-    parser.add_argument('--datum', type=Path, help='Defaults to datum.json beside RTK CSV')
+    parser.add_argument('--datum', type=Path,
+                        help='Defaults to map_enu.meta.yaml beside RTK CSV')
     parser.add_argument('--output', required=True, type=Path, help='New output directory; existing paths are refused')
+    parser.add_argument('--publish-dir', type=Path,
+                        help='Optional folder for map_enu_downsampled.pcd and map_enu.meta.yaml only')
     parser.add_argument('--lever-arm', nargs=3, type=float, required=True, metavar=('X','Y','Z'), help='IMU origin -> antenna, expressed in IMU axes, metres')
     parser.add_argument('--time-offset', type=float, default=0., help='t_map = t_RTK + offset, seconds')
     parser.add_argument('--max-gap', type=float, default=.25, help='Maximum trajectory interpolation interval, seconds')
@@ -685,14 +750,19 @@ def main(argv=None):
         raise ValueError('Invalid automatic selection parameters (<=201 time search grid points)')
     if not np.isfinite(args.map_voxel_size) or args.map_voxel_size < 0:
         raise ValueError('map_voxel_size must be finite and nonnegative')
+    if args.publish_dir is not None and not args.alignment_only and args.map_voxel_size <= 0:
+        raise ValueError('--publish-dir requires --map-voxel-size > 0')
     if args.output.exists():
         raise ValueError('Output already exists; select a new directory')
     poses = read_poses(args.session/'alidarState.txt')
-    datum_path = args.datum or args.rtk.parent/'datum.json'
-    datum = json.loads(datum_path.read_text())
-    for key in ('latitude', 'longitude', 'altitude'):
-        if not np.isfinite(float(datum[key])):
-            raise ValueError('Invalid datum')
+    if args.datum is not None:
+        datum_path = args.datum
+    else:
+        datum_path = args.rtk.parent/ENU_META_FILENAME
+        legacy_datum = args.rtk.parent/'datum.json'
+        if not datum_path.exists() and legacy_datum.exists():
+            datum_path = legacy_datum
+    datum = read_enu_origin(datum_path)
     records, invalid = [], 0
     last_stamp = -np.inf
     with args.rtk.open() as stream:
@@ -802,6 +872,14 @@ def main(argv=None):
             (args.output/'map_enu_downsampled.pcd').unlink(missing_ok=True)
             save_report()
             raise
+        if args.publish_dir is not None:
+            try:
+                report['published_files'] = publish_outputs(
+                    args.output, datum_path, args.publish_dir)
+            except Exception:
+                report['status'] = 'publish_failed'
+                save_report()
+                raise
     save_report()
     print(json.dumps(report, indent=2))
 
@@ -813,6 +891,9 @@ def run_ros():
     argv = []
     for name in ('session', 'rtk', 'output'):
         argv.extend(['--'+name, str(rospy.get_param('~'+name))])
+    publish_dir = rospy.get_param('~publish_dir', '')
+    if publish_dir:
+        argv.extend(['--publish-dir', publish_dir])
     lever = rospy.get_param('~lever_arm')
     if not isinstance(lever, list) or len(lever) != 3:
         raise ValueError('~lever_arm must contain three IMU-frame metre values')

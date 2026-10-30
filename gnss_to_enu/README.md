@@ -21,9 +21,31 @@ source devel/setup.bash
 使用不含空格或 shell 特殊字符的路径（原 Voxel-SLAM 用 shell mkdir 创建目录）。
 
 默认 `use_auto_datum=true`：第一条通过质量检查的 GNSS 测量经纬高作为 ENU 原点，
-该条 ENU 天线位置为 (0,0,0)，之后原点保持固定。实际经纬高自动写入 `datum.json`。
+该条 ENU 天线位置为 (0,0,0)，之后原点保持固定。
+实际经纬高按下游工具格式自动写入 `map_enu.meta.yaml`：
+
+```yaml
+enu_origin:
+  latitude: 22.39758935
+  longitude: 113.30942461
+  altitude: 25.86180000
+```
 也可设置 `use_auto_datum=false` 并指定固定原点；原点高度和 NavSatFix 高度必须使用相同基准。
 转换公式采用 WGS84 椭球高；若板卡输出海拔高，应先转换。不会自动做大地水准面改正。
+
+一键采集可使用 `scripts/run_flight.py`。脚本启动 LiDAR/GNSS、检查话题、开始建图，
+Ctrl+C 时请求 `/save_only` 并等待 `Final trajectory written`，保存校验通过后自动对齐导出：
+
+```bash
+python3 src/gnss_to_enu/scripts/run_flight.py \
+  --setup /ABS/PATH/TO/devel/setup.bash \
+  --run-id flight01
+```
+
+常用覆盖项包括 `--config`、`--manual-datum LAT LON ELLIPSOID_HEIGHT`、
+`--lever-arm X Y Z`、`--map-voxel-size` 和 `--save-mode finish`。
+成功导出后，`map_enu_downsampled.pcd` 和 `map_enu.meta.yaml` 会额外发布到
+`$HOME/voxel_enu_data/output/`。运行 `--help` 查看全部参数；`--dry-run` 只打印解析后的路径和命令。
 
 ## 2. 建图并记录 RTK
 
@@ -55,7 +77,7 @@ use_auto_datum:=false datum_lat:=LAT_DEG datum_lon:=LON_DEG datum_alt:=ELLIPSOID
 
 - `/rtk/gps_odom`：ENU 天线位置，frame_id 默认 `enu`；姿态为单位四元数占位，不是姿态观测。
 - `rtk_enu.csv`：原始测量时间戳、ENU 位置、原始 ENU 对角方差、NavSatStatus、协方差类型。
-- `datum.json`：实际原点、坐标转换说明及高度基准。
+- `map_enu.meta.yaml`：只保存实际 ENU 原点的纬度、经度和高度。
 
 CSV 记录发生在发布节流之前，保留全部通过质量门限的观测，逐行 flush。
 默认记录 launch 方差上限为 XY=0.01 m²，Z=0.04 m²，可通过 `xy_variance_max`、`z_variance_max` 调整。
@@ -128,7 +150,8 @@ roslaunch gnss_to_enu align_voxel_enu.launch \
   sample_distance:=1.0 alignment_only:=false
 ```
 
-`alignment_only:=true` 为仅检查配准，`datum` 留空使用 RTK CSV 旁的 `datum.json`。
+`alignment_only:=true` 为仅检查配准，`datum` 留空使用 RTK CSV 旁的 `map_enu.meta.yaml`。
+若目录中只有旧版 `datum.json`，对齐工具仍可读取它作为兼容输入，但新记录只生成 YAML。
 其他参数与下面 CLI 表格一致，但使用下划线名称，例如 `time_offset`、`max_rmse`。
 节点从 ROS 私有参数读取配置，执行一次后退出。它不会等待或触发 Voxel-SLAM 的结束保存，
 需确认通过 `/finish` 或 `/save_only` 完成轨迹保存后再启动。输出目录必须是新目录。路径通过 ROS 参数传入，不受命令行空格拆分影响。
@@ -279,6 +302,16 @@ Python CLI 对应 `--map-voxel-size 0.15`。这与拟合轨迹用的 `sample_dis
 - `automatic_selection.png`：候选窗口的误差/时间偏差图，星号表示采用窗口。
 - `map_enu.pcd`：完整 ENU 地图，binary XYZ float32；原保存格式没有可靠强度，本工具不输出 intensity。
 - `map_enu_downsampled.pcd`：完整地图在 ENU 全局体素网格中的质心降采样结果，默认体素 0.15 m。
+
+使用默认 launch 或一键脚本成功导出时，下面两个文件还会发布到
+`$HOME/voxel_enu_data/output/`，供下游程序直接读取：
+
+```text
+map_enu_downsampled.pcd
+map_enu.meta.yaml
+```
+
+该发布目录表示最近一次成功导出；逐次完整结果仍保存在 `output:=...` 指定的目录。
 
 完整成功的 `alignment.json.status` 为 `complete`，有警告但成功导出为 `complete_with_warnings`；
 只对齐为 `alignment_validated` 或 `alignment_with_warnings`；

@@ -17,11 +17,20 @@ a = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
 
 
+def write_meta(path, latitude=22., longitude=113., altitude=10.):
+    Path(path).write_text(
+        'enu_origin:\n'
+        f'  latitude: {latitude:.8f}\n'
+        f'  longitude: {longitude:.8f}\n'
+        f'  altitude: {altitude:.8f}\n')
+
+
 class AlignmentTests(unittest.TestCase):
     def test_ros_parameter_entrypoint(self):
         params={'~session':'/data/session with spaces', '~rtk':'/data/rtk.csv',
                 '~output':'/data/enu', '~lever_arm':[.1,-.2,.3], '~alignment_only':True,
-                '~sample_distance':2., '~datum':'/data/datum.json', '~map_voxel_size':0.5}
+                '~sample_distance':2., '~datum':'/data/map_enu.meta.yaml',
+                '~publish_dir':'/data/output', '~map_voxel_size':0.5}
         ros=SimpleNamespace(init_node=lambda name:None, loginfo=lambda msg:None,
                             get_param=lambda key,*default:params[key] if key in params else default[0])
         with patch.dict('sys.modules', {'rospy':ros}), patch.object(a,'main') as main:
@@ -32,7 +41,8 @@ class AlignmentTests(unittest.TestCase):
             self.assertIn('--alignment-only',argv)
             self.assertEqual(argv[argv.index('--map-voxel-size')+1],'0.5')
             self.assertEqual(argv[argv.index('--sample-distance')+1],'2.0')
-            self.assertEqual(argv[argv.index('--datum')+1],'/data/datum.json')
+            self.assertEqual(argv[argv.index('--datum')+1],'/data/map_enu.meta.yaml')
+            self.assertEqual(argv[argv.index('--publish-dir')+1],'/data/output')
             params['~alignment_only']='false'
             with self.assertRaises(ValueError): a.run_ros()
 
@@ -77,7 +87,7 @@ class AlignmentTests(unittest.TestCase):
                 with (session/(str(i)+'.pcd')).open('wb') as f:
                     f.write(header)
                     np.column_stack([xyz,np.zeros(2)]).astype('<f4').tofile(f)
-            (root/'datum.json').write_text(json.dumps({'latitude':22.,'longitude':113.,'altitude':10.}))
+            write_meta(root/'map_enu.meta.yaml')
             with (root/'rtk_enu.csv').open('w') as f:
                 w=csv.writer(f); w.writerow(['timestamp','east','north','up','var_e','var_n','var_u'])
                 # Use midpoint times to exercise interpolation rather than exact matches.
@@ -87,7 +97,9 @@ class AlignmentTests(unittest.TestCase):
                     enu=r@(p+rot@lever)+t
                     w.writerow([format(time,'.9f'),*enu,.0004,.0004,.0016])
             out=root/'output'
+            published=root/'published'
             args=['--session',str(session),'--rtk',str(root/'rtk_enu.csv'),'--output',str(out),
+                  '--publish-dir',str(published),
                   '--lever-arm',*map(str,lever),'--sample-distance','0.5','--inlier-threshold','0.01']
             a.main(args)
             tr=np.loadtxt(out/'T_enu_map.txt')
@@ -105,6 +117,12 @@ class AlignmentTests(unittest.TestCase):
             self.assertEqual(report['downsampled_map_points'],len(a.read_pcd_xyz(out/'map_enu_downsampled.pcd')))
             self.assertTrue((out/'trajectory_comparison.png').stat().st_size > 10000)
             self.assertIsNotNone(json.loads((out/'diagnostic.json').read_text())['candidate_T_enu_map'])
+            self.assertEqual(
+                {path.name for path in published.iterdir()},
+                {'map_enu_downsampled.pcd', 'map_enu.meta.yaml'})
+            self.assertEqual(
+                (published/'map_enu.meta.yaml').read_text(),
+                (root/'map_enu.meta.yaml').read_text())
             with self.assertRaises(ValueError):
                 a.main(args)
             # A computable transform MUST export the map even when quality thresholds fail.
@@ -133,7 +151,7 @@ class AlignmentTests(unittest.TestCase):
             stamps=1700000000.+np.arange(n)*.1
             angle=np.linspace(0,2*np.pi,n)
             xyz=np.column_stack([10*np.cos(angle),8*np.sin(angle),angle*.1])
-            (root/'datum.json').write_text(json.dumps({'latitude':22.,'longitude':113.,'altitude':10.}))
+            write_meta(root/'map_enu.meta.yaml')
             cases=('quality_gate','insufficient_inliers','too_few_samples','degenerate','no_time_overlap','no_valid_rtk')
             for case in cases:
                 with self.subTest(case=case):
@@ -189,7 +207,7 @@ class AlignmentTests(unittest.TestCase):
             yaw=.03*t+.0002*t*t
             poses=np.column_stack([stamps,xyz,np.zeros((len(t),2)),np.sin(yaw/2),np.cos(yaw/2)])
             np.savetxt(session/'alidarState.txt',poses,fmt='%.12f')
-            (root/'datum.json').write_text(json.dumps({'latitude':22.,'longitude':113.,'altitude':10.}))
+            write_meta(root/'map_enu.meta.yaml')
             r=a.quaternion_matrix([.1,.2,.3,.9]); tr=np.array([20.,-10.,5.]); lever=np.array([.3,-.2,.1])
             rt=1700000000.+np.arange(2,180,1.)
             with (root/'rtk.csv').open('w') as f,(root/'rtk_quality.csv').open('w') as q:
